@@ -1,0 +1,54 @@
+data:
+  raw_root: "F:/sih/dataset/sequences"
+  processed_root: "F:/sih/processed"
+  train_seqs: [0, 1, 2, 3, 4, 5, 6, 7]
+  val_seqs: [8]
+  shard_size: 200
+
+model:
+  name: "range_image_unet"
+  h: 64
+  w: 2048
+  fov_top_deg: 2.0
+  fov_bottom_deg: -24.8
+  in_channels: 5
+  base_channels: 32
+  num_classes: 4
+  use_groupnorm: true
+  groups: 8
+
+train:
+  optimizer: "adamw"
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  batch_size: 4
+  grad_accum_steps: 2
+  max_range: 80.0
+  min_range: 2.0
+  epochs: 100
+  patience: 15
+  val_every_steps: 500
+  warmup_steps: 500
+  grad_clip: 5.0
+
+  loss:
+    ce_weight: 1.0
+    lovasz_weight: 1.0
+
+  augmentation:
+    random_flip_h: true
+    random_flip_h_prob: 0.5
+    random_rotation_z: true
+    random_rotation_z_range: [-0.7854, 0.7854]
+    intensity_jitter: true
+    intensity_jitter_prob: 0.3
+    intensity_jitter_std: 0.05
+    cutout: true
+    cutout_prob: 0.3
+    cutout_h: 16
+    cutout_w: 256
+
+checkpoint:
+  dir: "F:/sih/checkpoints"
+  best_name: "best_miou.pt"
+  last_name: "last.pt"
