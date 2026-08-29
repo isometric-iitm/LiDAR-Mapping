@@ -19,9 +19,12 @@ data/
 # Model checkpoints (delivered via Release/LFS — see Epic 1.1)
 *.pt
 
-# Eval outputs
+# Eval outputs (track JSON, MD, PNG; ignore temp/large files)
 results/*
 !results/.gitkeep
+!results/*.json
+!results/*.md
+!results/*.png
 
 # Dashboard (has its own .gitignore; keep here as belt-and-suspenders)
 dashboard/.next/
