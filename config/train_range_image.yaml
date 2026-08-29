@@ -1,6 +1,6 @@
 data:
-  raw_root: "F:/sih/dataset/sequences"
-  processed_root: "F:/sih/processed"
+  raw_root: "data/sequences"   # relative to pc2d/; override with $PC2D_RAW_ROOT
+  processed_root: "data/processed"  # relative to pc2d/; override with $PC2D_PROCESSED_ROOT
   train_seqs: [0, 1, 2, 3, 4, 5, 6, 7]
   val_seqs: [8]
   shard_size: 200
@@ -48,6 +48,6 @@ train:
     cutout_w: 256
 
 checkpoint:
-  dir: "F:/sih/checkpoints"
+  dir: "checkpoints"  # relative to pc2d/; override with $PC2D_CKPT_DIR
   best_name: "best_miou.pt"
   last_name: "last.pt"

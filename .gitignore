@@ -7,4 +7,25 @@ wheels/
 *.egg-info
 
 # Virtual environments
-.venv
+.venv/
+
+# Local environment (machine-specific paths). Keep .env.example as the committed template.
+.env
+!.env.example
+
+# Dataset / raw data (never commit — lives on F:/ or is downloaded)
+data/
+
+# Model checkpoints (delivered via Release/LFS — see Epic 1.1)
+*.pt
+
+# Eval outputs
+results/*
+!results/.gitkeep
+
+# Dashboard (has its own .gitignore; keep here as belt-and-suspenders)
+dashboard/.next/
+dashboard/node_modules/
+
+# Absolute F:/ paths should never be referenced in committed defaults
+# (not pattern-matchable; handled by config review — see Epic 0.2)

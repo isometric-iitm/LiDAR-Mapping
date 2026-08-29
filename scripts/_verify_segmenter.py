@@ -6,14 +6,17 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.common.config import load_config, resolve_path
 from src.models.predict import Segmenter
 from src.data.label_mapping import bin_5_to_4
 
-seq_dir = Path("F:/sih/dataset/sequences/08/velodyne")
+# Paths come from config + env (see .env). Nothing hardcoded here.
+cfg = load_config("pipeline")
+seq_dir = resolve_path(cfg["source"]["seq_dir"]) / "velodyne"
 bins = sorted(seq_dir.glob("*.bin"))
-print(f"found {len(bins)} scans")
+print(f"found {len(bins)} scans in {seq_dir}")
 
-seg = Segmenter("F:/sih/checkpoints/best_miou.pt")
+seg = Segmenter("checkpoints/best_miou.pt")
 
 for idx in [0, 100, 1000]:
     pts = np.fromfile(str(bins[idx]), dtype=np.float32).reshape(-1, 4)

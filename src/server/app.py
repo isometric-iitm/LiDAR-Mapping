@@ -9,7 +9,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import numpy as np
-import yaml
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -24,13 +23,18 @@ class Pipeline:
     """Background thread: replayer -> segmenter -> grid. Produces WS message dicts."""
 
     def __init__(self, cfg: dict):
+        from src.common.config import resolve_path
         self.cfg = cfg
         src = cfg["source"]
         mdl = cfg["model"]
+        # seq_dir and checkpoint may be relative to the repo root — resolve them
+        # so we don't depend on the process CWD.
+        seq_dir = resolve_path(src["seq_dir"])
+        checkpoint = resolve_path(mdl["checkpoint"])
         self.replayer = SemanticKITTIReplayer(
-            src["seq_dir"], playback_speed=src["playback_speed"], loop=src["loop"]
+            seq_dir, playback_speed=src["playback_speed"], loop=src["loop"]
         )
-        self.segmenter = Segmenter(mdl["checkpoint"], h=mdl["h"], w=mdl["w"])
+        self.segmenter = Segmenter(checkpoint, h=mdl["h"], w=mdl["w"])
         self.grid = LogPolarGrid()
         self.grid_lock = threading.Lock()
         self.messages: queue.Queue = queue.Queue(maxsize=120)
@@ -329,9 +333,8 @@ def _load_pose_mats(seq_dir: str | Path) -> np.ndarray | None:
 
 
 def load_pipeline_config() -> dict:
-    path = Path(__file__).resolve().parent.parent.parent / "config" / "pipeline.yaml"
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
+    from src.common.config import load_config
+    return load_config("pipeline")
 
 
 def load_history(ckpt_dir: str | Path) -> list[dict]:
@@ -412,7 +415,8 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.get("/metrics/history")
     async def metrics_history():
-        return load_history(cfg["server"]["ckpt_dir"])
+        from src.common.config import resolve_path
+        return load_history(resolve_path(cfg["server"]["ckpt_dir"]))
 
     @app.get("/metrics/memory")
     async def metrics_memory():

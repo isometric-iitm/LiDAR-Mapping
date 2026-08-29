@@ -1,3 +1,4 @@
+import os
 import time
 from pathlib import Path
 
@@ -49,10 +50,15 @@ class Segmenter:
             use_groupnorm=use_groupnorm,
             groups=groups,
         )
-        ckpt = torch.load(str(checkpoint), map_location=self.device, weights_only=False)
+        from src.common.config import resolve_path
+        # Env override (highest priority) lets a machine point the segmenter at
+        # its own checkpoint without touching config; falls back to the passed arg.
+        checkpoint = os.getenv("PC2D_CHECKPOINT", "") or checkpoint
+        ckpt_path = resolve_path(checkpoint)
+        ckpt = torch.load(str(ckpt_path), map_location=self.device, weights_only=False)
         self.model.load_state_dict(ckpt["model_state_dict"])
         self.model.to(self.device).eval()
-        print(f"[Segmenter] loaded {checkpoint} (best_miou={ckpt.get('best_miou', 'n/a'):.4f}) on {self.device}")
+        print(f"[Segmenter] loaded {ckpt_path} (best_miou={ckpt.get('best_miou', 'n/a'):.4f}) on {self.device}")
 
     @torch.inference_mode()
     def segment(self, points: np.ndarray) -> tuple[np.ndarray, dict]:

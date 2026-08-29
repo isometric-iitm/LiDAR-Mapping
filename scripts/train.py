@@ -102,11 +102,14 @@ def validate(model, val_loader, loss_fn, device, num_classes: int, max_batches: 
     return avg_loss, miou_5, miou_4, class_ious_5, class_ious_4
 
 
-def train(cfg: dict, resume: str | None = None):
+def train(cfg: dict, resume: str | None = None,
+          processed_root: str | Path | None = None,
+          ckpt_dir: str | Path | None = None):
+    from src.common.config import resolve_path
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    processed_root = cfg["data"]["processed_root"]
+    processed_root = resolve_path(processed_root or cfg["data"]["processed_root"])
     meta_path = Path(processed_root) / "meta.json"
     if not meta_path.exists():
         print(f"ERROR: {meta_path} not found. Run scripts/preprocess_to_shards.py first.")
@@ -163,7 +166,7 @@ def train(cfg: dict, resume: str | None = None):
 
     augment = RangeImageAugment(cfg["train"].get("augmentation", {}))
 
-    ckpt_dir = Path(cfg["checkpoint"]["dir"])
+    ckpt_dir = resolve_path(ckpt_dir or cfg["checkpoint"]["dir"])
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_path = ckpt_dir / cfg["checkpoint"]["best_name"]
     last_path = ckpt_dir / cfg["checkpoint"]["last_name"]
@@ -334,17 +337,26 @@ def train(cfg: dict, resume: str | None = None):
 
 
 def main():
-    import yaml
+    from src.common.config import load_config
     parser = argparse.ArgumentParser(description="Train range-image UNet")
     parser.add_argument("--config", type=str, default="train_range_image")
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--processed-root", type=str, default=None,
+                        help="Root with train/val shards + meta.json (default: config + PC2D_PROCESSED_ROOT)")
+    parser.add_argument("--raw-root", type=str, default=None,
+                        help="Root of raw sequences (default: config + PC2D_RAW_ROOT)")
+    parser.add_argument("--ckpt-dir", type=str, default=None,
+                        help="Directory for checkpoints + history.jsonl (default: config + PC2D_CKPT_DIR)")
     args = parser.parse_args()
 
-    config_path = Path(__file__).resolve().parent.parent / "config" / f"{args.config}.yaml"
-    with open(config_path) as f:
-        cfg = yaml.safe_load(f)
+    cfg = load_config(args.config)
 
-    train(cfg, resume=args.resume)
+    # CLI flags take highest priority; raw_root only matters if a later step needs it.
+    if args.raw_root:
+        cfg["data"]["raw_root"] = args.raw_root
+    train(cfg, resume=args.resume,
+          processed_root=args.processed_root,
+          ckpt_dir=args.ckpt_dir)
 
 
 if __name__ == "__main__":

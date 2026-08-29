@@ -1,11 +1,11 @@
 # Live streaming pipeline configuration (PROJECT_SPEC §10/§11)
 source:
-  seq_dir: "F:/sih/dataset/sequences/08"
+  seq_dir: "data/sequences/08"   # relative to pc2d/; override with $PC2D_SEQ_DIR
   playback_speed: 1.0
   loop: true
 
 model:
-  checkpoint: "F:/sih/checkpoints/best_miou.pt"
+  checkpoint: "checkpoints/best_miou.pt"  # relative to pc2d/; override with $PC2D_CHECKPOINT
   h: 64
   w: 2048
 
@@ -14,7 +14,7 @@ server:
   port: 8000
   snapshot_interval_frames: 20   # full snapshot cadence (frames)
   stats_interval_frames: 2       # stats cadence (frames; drives Timeline position)
-  ckpt_dir: "F:/sih/checkpoints" # for /metrics/history
+  ckpt_dir: "checkpoints"        # for /metrics/history; override with $PC2D_CKPT_DIR
   cloud_points_max: 30000        # downsampled points for the accumulated cloud view
   cloud_history_frames: 30       # rolling world-anchored frames kept for accumulation
 

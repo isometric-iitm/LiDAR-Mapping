@@ -34,6 +34,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from src.common.config import load_config, resolve_path
 from src.data.webdataset_loader import create_train_loader, create_val_loader
 from src.data.augmentation import RangeImageAugment
 from src.data.label_mapping import bin_5_to_4
@@ -41,6 +42,7 @@ from src.models.unet import RangeImageUNet
 from src.models.lovasz import CombinedLoss
 from scripts.train import validate
 
+processed_root = str(resolve_path(load_config("train_range_image")["data"]["processed_root"]))
 device = torch.device("cuda")
 model = RangeImageUNet(in_channels=5, num_classes=5, base_channels=32).to(device)
 loss_fn = CombinedLoss(num_classes=5, class_weights=[1.0, 0.64, 1.0, 2.0, 5.0], lovasz_weight=0.5).to(device)
@@ -48,8 +50,8 @@ opt = torch.optim.AdamW(model.parameters(), lr=5e-4)
 scaler = torch.amp.GradScaler("cuda")
 aug = RangeImageAugment({})
 
-train_loader = create_train_loader("F:/sih/processed", batch_size=2, num_workers=2)
-val_loader = create_val_loader("F:/sih/processed", batch_size=2, num_workers=0)
+train_loader = create_train_loader(processed_root, batch_size=2, num_workers=2)
+val_loader = create_val_loader(processed_root, batch_size=2, num_workers=0)
 
 
 def mark(name):

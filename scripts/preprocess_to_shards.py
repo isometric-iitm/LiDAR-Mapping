@@ -114,9 +114,15 @@ def _write_shard(shard_path: Path, samples: list):
 
 
 def main():
+    from src.common.config import load_config, resolve_path
+    cfg = load_config("train_range_image")
+    data_cfg = cfg.get("data", {})
+
     parser = argparse.ArgumentParser(description="Preprocess SemanticKITTI -> precomputed 5-class shards")
-    parser.add_argument("--raw-root", type=str, default="F:/sih/dataset/sequences")
-    parser.add_argument("--processed-root", type=str, default="F:/sih/processed")
+    parser.add_argument("--raw-root", type=str, default=None,
+                        help="Root of raw sequences (default: config/data.raw_root or $PC2D_RAW_ROOT)")
+    parser.add_argument("--processed-root", type=str, default=None,
+                        help="Output root for train/val shards (default: config/data.processed_root or $PC2D_PROCESSED_ROOT)")
     parser.add_argument("--train-seqs", type=int, nargs="+", default=[0, 1, 2, 3, 4, 5, 6, 7])
     parser.add_argument("--val-seqs", type=int, nargs="+", default=[8])
     parser.add_argument("--shard-size", type=int, default=200)
@@ -124,8 +130,18 @@ def main():
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
-    raw_root = Path(args.raw_root)
-    processed_root = Path(args.processed_root)
+    raw_root = resolve_path(args.raw_root if args.raw_root else data_cfg.get("raw_root", "data/sequences"))
+    processed_root = resolve_path(args.processed_root if args.processed_root else data_cfg.get("processed_root", "data/processed"))
+
+    # Warn when the resolved path still points at the legacy absolute F:/ location,
+    # since it must be mounted on this machine for it to be valid.
+    resolved_raw = str(raw_root)
+    resolved_proc = str(processed_root)
+    if resolved_raw.startswith("F:") or "F:/" in resolved_raw:
+        print(f"[WARN] raw-root resolves to {resolved_raw} — F:/ must be mounted, or set PC2D_RAW_ROOT")
+    if resolved_proc.startswith("F:") or "F:/" in resolved_proc:
+        print(f"[WARN] processed-root resolves to {resolved_proc} — F:/ must be mounted, or set PC2D_PROCESSED_ROOT")
+
     mapping = load_class_mapping(
         Path(__file__).resolve().parent.parent / "config" / "classes.yaml"
     )
