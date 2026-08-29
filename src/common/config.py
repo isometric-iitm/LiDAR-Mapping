@@ -11,6 +11,7 @@ Committed config YAMLs carry relative defaults. Local .env holds machine-specifi
 absolute paths (e.g. F:/sih/...). See .env.example for the full contract.
 """
 import os
+import warnings
 from pathlib import Path
 
 import yaml
@@ -45,6 +46,9 @@ _ENV_TARGETS: dict[str, list[list[str]]] = {
     "PC2D_CKPT_DIR": [["server", "ckpt_dir"], ["checkpoint", "dir"]],
     "PC2D_RAW_ROOT": [["data", "raw_root"]],
     "PC2D_PROCESSED_ROOT": [["data", "processed_root"]],
+    "PC2D_DEVICE": [["model", "device"]],
+    "PC2D_PRECISION": [["model", "precision"]],
+    "PC2D_PLAYBACK_SPEED": [["source", "playback_speed"]],
 }
 
 # Which sections each env var can touch, used to restrict overrides to the YAML
@@ -55,6 +59,14 @@ _ENV_SECTIONS: dict[str, set[str]] = {
     "PC2D_CKPT_DIR": {"server", "checkpoint"},
     "PC2D_RAW_ROOT": {"data"},
     "PC2D_PROCESSED_ROOT": {"data"},
+    "PC2D_DEVICE": {"model"},
+    "PC2D_PRECISION": {"model"},
+    "PC2D_PLAYBACK_SPEED": {"source"},
+}
+
+# env var -> cast applied to the string value before it overrides the YAML.
+_ENV_CASTS: dict[str, callable] = {
+    "PC2D_PLAYBACK_SPEED": float,
 }
 
 
@@ -86,8 +98,13 @@ def apply_env_overrides(cfg: dict, sections: set[str] | None = None) -> dict:
             continue
         if sections is not None and not _ENV_SECTIONS[env].intersection(sections):
             continue
+        cast = _ENV_CASTS.get(env)
+        try:
+            val = cast(value) if cast is not None else value
+        except (TypeError, ValueError):
+            val = value
         for t in targets:
-            _safe_set(cfg, t, value)
+            _safe_set(cfg, t, val)
     return cfg
 
 
@@ -114,3 +131,35 @@ def merge_configs(*names: str) -> dict:
     for name in names:
         result.update(load_config(name))
     return result
+
+
+def resolve_device(requested: str | None = None) -> str:
+    """Normalize a `model.device` value (config/env/CLI) into 'cuda' or 'cpu'.
+
+    ``auto`` -> 'cuda' if a GPU is available else 'cpu'. An explicit 'cuda'
+    on a machine without a GPU falls back to CPU with a warning rather than
+    crashing. Invalid values warn and fall back to 'auto' behavior.
+    """
+    import torch
+
+    val = (requested or "auto").strip().lower()
+    if val == "cuda":
+        if torch.cuda.is_available():
+            return "cuda"
+        warnings.warn("device=cuda requested but CUDA is unavailable; falling back to cpu")
+        return "cpu"
+    if val == "cpu":
+        return "cpu"
+    if val != "auto":
+        warnings.warn(f"unknown device '{requested}' (expected auto|cuda|cpu); using auto")
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def resolve_precision(requested: str | None = None) -> str:
+    """Normalize a `model.precision` value (config/env/CLI) into 'fp32'|'fp16'."""
+    val = (requested or "auto").strip().lower()
+    if val in ("fp16", "16", "half"):
+        return "fp16"
+    if val in ("fp32", "32", "float32"):
+        return "fp32"
+    return "fp16"

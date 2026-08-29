@@ -34,7 +34,13 @@ class Pipeline:
         self.replayer = SemanticKITTIReplayer(
             seq_dir, playback_speed=src["playback_speed"], loop=src["loop"]
         )
-        self.segmenter = Segmenter(checkpoint, h=mdl["h"], w=mdl["w"])
+        self.segmenter = Segmenter(
+            checkpoint,
+            h=mdl["h"],
+            w=mdl["w"],
+            device=mdl.get("device", "auto"),
+            precision=mdl.get("precision", "fp16"),
+        )
         self.grid = LogPolarGrid()
         self.grid_lock = threading.Lock()
         self.messages: queue.Queue = queue.Queue(maxsize=120)
@@ -48,6 +54,8 @@ class Pipeline:
         self._last_stats_frame = 0
         self._frame_time_window = []
         self._stage_window = {"seg": [], "grid": [], "pack": [], "cloud": []}
+        self._project_window = []
+        self._forward_window = []
         self._mem = None
         self.cloud_on = False
         self.cloud_max = int(self.cfg["server"].get("cloud_points_max", 30000))
@@ -212,9 +220,12 @@ class Pipeline:
         self._stage_window["grid"].append(grid_ms)
         self._stage_window["pack"].append(pack_ms)
         self._stage_window["cloud"].append(cloud_ms)
+        self._project_window.append(timings.get("project", 0.0))
+        self._forward_window.append(timings.get("forward", 0.0))
         self._frame_time_window.append(proc_ms)
         for buf in (self._stage_window["seg"], self._stage_window["grid"],
                     self._stage_window["pack"], self._stage_window["cloud"],
+                    self._project_window, self._forward_window,
                     self._frame_time_window):
             if len(buf) > 100:
                 buf.pop(0)
@@ -294,6 +305,8 @@ class Pipeline:
             "grid_ms": stages["grid"],
             "pack_ms": stages["pack"],
             "cloud_ms": stages["cloud"],
+            "project_ms": round(float(np.mean(self._project_window)), 1) if self._project_window else 0.0,
+            "forward_ms": round(float(np.mean(self._forward_window)), 1) if self._forward_window else 0.0,
             "grid_mem_kb": mem["grid_kb"],
             "uniform_equiv_mb": mem["uniform_mb"],
             "compression_ratio": mem["compression_ratio"],

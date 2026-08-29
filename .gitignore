@@ -29,3 +29,6 @@ dashboard/node_modules/
 
 # Absolute F:/ paths should never be referenced in committed defaults
 # (not pattern-matchable; handled by config review — see Epic 0.2)
+# ONNX CPU export (weights split into external *.onnx.data blob)
+*.onnx
+*.onnx.data

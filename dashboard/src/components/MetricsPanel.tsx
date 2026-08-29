@@ -101,6 +101,8 @@ export default function MetricsPanel({
               per-stage ms
             </div>
             <Row k="Segment" v={`${fmt(stats?.seg_ms)}`} sub="ms" />
+            <Row k="·Proj" v={`${fmt(stats?.project_ms)}`} sub="ms" />
+            <Row k="·Fwd" v={`${fmt(stats?.forward_ms)}`} sub="ms" />
             <Row k="Grid" v={`${fmt(stats?.grid_ms)}`} sub="ms" />
             <Row k="Pack" v={`${fmt(stats?.pack_ms)}`} sub="ms" />
             <Row k="Cloud" v={`${fmt(stats?.cloud_ms)}`} sub="ms" />

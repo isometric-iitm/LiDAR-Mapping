@@ -10,6 +10,8 @@ model:
   name: "range_image_unet"
   h: 64
   w: 2048
+  device: auto      # auto | cuda | cpu ; auto = cuda if available else cpu; override with $PC2D_DEVICE
+  precision: fp16   # fp32 | fp16 ; fp16 enables autocast + GradScaler on cuda; override with $PC2D_PRECISION
   fov_top_deg: 2.0
   fov_bottom_deg: -24.8
   in_channels: 5

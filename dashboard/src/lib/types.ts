@@ -22,6 +22,8 @@ export type Stats = {
   grid_ms?: number;
   pack_ms?: number;
   cloud_ms?: number;
+  project_ms?: number;
+  forward_ms?: number;
   grid_mem_kb: number;
   uniform_equiv_mb: number;
   compression_ratio: number;
