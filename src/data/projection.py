@@ -1,5 +1,74 @@
+import math
+
 import numpy as np
 import torch
+
+
+# ---- GPU (torch) projection: all trig + scatter stay on-device ----
+def project_points_gpu(
+    points: torch.Tensor,
+    h: int = 64,
+    w: int = 2048,
+    fov_top_deg: float = 2.0,
+    fov_bottom_deg: float = -24.8,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Torch version of compute_projection. Returns (row, col, range) long/f32."""
+    x = points[:, 0]
+    y = points[:, 1]
+    z = points[:, 2]
+    r = torch.sqrt(x * x + y * y + z * z).clamp_min(1e-6)
+
+    fov_top = torch.tensor(math.radians(fov_top_deg), device=points.device)
+    fov_bottom = torch.tensor(math.radians(fov_bottom_deg), device=points.device)
+    fov = fov_top - fov_bottom
+
+    row = (1.0 - (torch.asin(z / r) - fov_bottom) / fov) * (h - 1)
+    col = 0.5 * (torch.atan2(y, x) / math.pi + 1.0) * w
+    row = row.floor().long().clamp(0, h - 1)
+    col = col.floor().long().clamp(0, w - 1)
+    return row, col, r
+
+
+def build_range_image_gpu(
+    points: torch.Tensor,
+    row: torch.Tensor,
+    col: torch.Tensor,
+    r: torch.Tensor,
+    h: int = 64,
+    w: int = 2048,
+    max_range: float = 80.0,
+) -> torch.Tensor:
+    """Torch version of build_range_image: nearest point per cell wins.
+
+    torch does NOT promise last-write-wins for duplicate advanced-index
+    assignment, so instead of relying on write order we first compute the
+    unique winning (cell -> nearest point) pairs and scatter those only:
+      - order points by range ascending (nearest first)
+      - stable-sort that order by cell -> per-cell ascending range runs
+      - keep the first element of each run (= nearest point of its cell)
+    The final scatter has one index per cell, i.e. no duplicates at all.
+    Returns (5, h, w) float32 on the points' device.
+    """
+    o1 = torch.argsort(r, stable=True)
+    flat = (row * w + col)
+    o2 = torch.argsort(flat[o1], stable=True)
+    sel = o1[o2]                      # grouped by cell, ascending range within group
+    fls = flat[sel]
+    first = torch.cat([torch.ones(1, dtype=torch.bool, device=row.device),
+                       fls[1:] != fls[:-1]])
+    win = sel[first]                  # one nearest point per occupied cell
+    rw = row[win]
+    cw = col[win]
+    vals = torch.stack([
+        r[win] / max_range,
+        points[win, 0] / max_range,
+        points[win, 1] / max_range,
+        points[win, 2] / max_range,
+        points[win, 3],
+    ], dim=1)
+    img = torch.zeros((h, w, 5), device=points.device, dtype=torch.float32)
+    img[rw, cw] = vals
+    return img.permute(2, 0, 1).contiguous()
 
 
 def compute_projection(

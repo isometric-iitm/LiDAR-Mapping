@@ -4,6 +4,7 @@ data:
   train_seqs: [0, 1, 2, 3, 4, 5, 6, 7]
   val_seqs: [8]
   shard_size: 200
+  num_workers: 0
 
 model:
   name: "range_image_unet"
@@ -13,16 +14,16 @@ model:
   fov_bottom_deg: -24.8
   in_channels: 5
   base_channels: 32
-  num_classes: 4
+  num_classes: 5
   use_groupnorm: true
   groups: 8
 
 train:
   optimizer: "adamw"
-  lr: 1.0e-3
+  lr: 5.0e-4
   weight_decay: 1.0e-4
-  batch_size: 4
-  grad_accum_steps: 2
+  batch_size: 2
+  grad_accum_steps: 4
   max_range: 80.0
   min_range: 2.0
   epochs: 100
@@ -33,13 +34,11 @@ train:
 
   loss:
     ce_weight: 1.0
-    lovasz_weight: 1.0
+    lovasz_weight: 0.5
 
   augmentation:
     random_flip_h: true
     random_flip_h_prob: 0.5
-    random_rotation_z: true
-    random_rotation_z_range: [-0.7854, 0.7854]
     intensity_jitter: true
     intensity_jitter_prob: 0.3
     intensity_jitter_std: 0.05

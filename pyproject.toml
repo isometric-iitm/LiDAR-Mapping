@@ -5,11 +5,13 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+  "fastapi>=0.141.1",
   "numpy>=2.5.2",
   "pyyaml>=6.0.3",
   "scipy>=1.18.1",
   "torch>=2.11.0",
   "torchvision>=0.26.0",
+  "uvicorn[standard]>=0.52.4",
   "webdataset>=1.0.2",
 ]
 

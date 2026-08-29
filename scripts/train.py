@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import gc
 import json
 import sys
 import time
@@ -14,8 +15,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.models.unet import RangeImageUNet
 from src.models.lovasz import CombinedLoss
 from src.data.webdataset_loader import create_train_loader, create_val_loader
-from src.data.projection import build_range_image, build_label_image
 from src.data.augmentation import RangeImageAugment
+from src.data.label_mapping import bin_5_to_4
+
+
+CLASS_NAMES_5 = ["drivable", "terrain_nondrivable", "static_obstacle", "dynamic_vehicle", "dynamic_pedestrian"]
+CLASS_NAMES_4 = ["drivable", "terrain_nondrivable", "static_obstacle", "dynamic_object"]
 
 
 class CosineWarmupScheduler:
@@ -35,85 +40,66 @@ class CosineWarmupScheduler:
             pg["lr"] = base_lr * scale
 
 
-def compute_miou(preds: np.ndarray, targets: np.ndarray, num_classes: int = 4, ignore_index: int = 255) -> tuple[float, list[float]]:
-    valid = targets != ignore_index
-    preds = preds[valid]
-    targets = targets[valid]
+def miou_from_confusion(cm: np.ndarray) -> tuple[float, list[float]]:
+    num_classes = cm.shape[0]
+    inter = np.diag(cm).astype(np.float64)
+    union = cm.sum(axis=0) + cm.sum(axis=1) - inter
     class_ious = []
     for c in range(num_classes):
-        pred_c = preds == c
-        tgt_c = targets == c
-        inter = np.sum(pred_c & tgt_c)
-        uni = np.sum(pred_c | tgt_c)
-        class_ious.append(float(inter / uni) if uni > 0 else float("nan"))
+        class_ious.append(float(inter[c] / union[c]) if union[c] > 0 else float("nan"))
     valid_ious = [x for x in class_ious if not np.isnan(x)]
     mean_iou = float(np.mean(valid_ious)) if valid_ious else 0.0
     return mean_iou, class_ious
 
 
-def build_batch(points_list, labels_list, proj_list, device, augment, is_train, h, w, max_range):
-    range_imgs = []
-    label_imgs = []
-    for i in range(len(points_list)):
-        pts = points_list[i].cpu().numpy()
-        lbl = labels_list[i].cpu().numpy()
-        prj = proj_list[i].cpu().numpy()
-
-        if is_train and augment is not None:
-            ri, li, _ = augment(pts, prj, lbl)
-        else:
-            remissions = pts[:, 3] if pts.shape[1] > 3 else np.zeros(len(pts))
-            ranges = np.sqrt(np.sum(pts[:, :3] ** 2, axis=1))
-            ri = build_range_image(pts, prj, remissions, ranges, h=h, w=w, max_range=max_range)
-            li = build_label_image(lbl, prj, ranges, h=h, w=w)
-
-        range_imgs.append(torch.from_numpy(ri))
-        label_imgs.append(torch.from_numpy(li))
-
-    range_img_batch = torch.stack(range_imgs).to(device, non_blocking=True)
-    label_img_batch = torch.stack(label_imgs).to(device, non_blocking=True)
-    return range_img_batch, label_img_batch
+def update_confusion(cm: np.ndarray, preds: np.ndarray, targets: np.ndarray, ignore_index: int = 255) -> np.ndarray:
+    valid = targets != ignore_index
+    p = preds[valid].reshape(-1)
+    t = targets[valid].reshape(-1)
+    np.add.at(cm, (t, p), 1)
+    return cm
 
 
 @torch.no_grad()
-def validate(model, val_loader, loss_fn, device, cfg, augment, max_batches=50):
+def validate(model, val_loader, loss_fn, device, num_classes: int, max_batches: int = 20):
     model.eval()
     total_loss = 0.0
-    all_preds = []
-    all_targets = []
+    cm_5 = np.zeros((num_classes, num_classes), dtype=np.int64)
+    cm_4 = np.zeros((4, 4), dtype=np.int64)
     n = 0
-
-    h, w = cfg["model"]["h"], cfg["model"]["w"]
-    max_range = cfg["train"]["max_range"]
 
     for batch_idx, batch in enumerate(val_loader):
         if batch_idx >= max_batches:
             break
 
-        points, labels, proj = batch
-        range_img_batch, label_img_batch = build_batch(
-            points, labels, proj, device, None, False, h, w, max_range,
-        )
+        ri_batch, li_batch = batch
+        ri_batch = ri_batch.to(device, non_blocking=True)
+        li_batch = li_batch.to(device, non_blocking=True)
 
         with torch.amp.autocast("cuda", enabled=True):
-            logits = model(range_img_batch)
-            loss = loss_fn(logits, label_img_batch)
+            logits = model(ri_batch)
+            loss = loss_fn(logits, li_batch)
 
         total_loss += loss.item()
         n += 1
 
-        preds = logits.argmax(dim=1).cpu().numpy()
-        tgts = label_img_batch.cpu().numpy()
-        all_preds.append(preds.reshape(-1))
-        all_targets.append(tgts.reshape(-1))
+        preds_5 = logits.argmax(dim=1).cpu().numpy()
+        tgts_5 = li_batch.cpu().numpy()
+        preds_4 = bin_5_to_4(preds_5)
+        tgts_4 = bin_5_to_4(tgts_5)
+
+        update_confusion(cm_5, preds_5, tgts_5)
+        update_confusion(cm_4, preds_4, tgts_4)
+
+        del logits, preds_5, tgts_5, preds_4, tgts_4
+        torch.cuda.empty_cache()
 
     avg_loss = total_loss / max(n, 1)
-    all_preds = np.concatenate(all_preds)
-    all_targets = np.concatenate(all_targets)
-    miou, class_ious = compute_miou(all_preds, all_targets)
+    miou_5, class_ious_5 = miou_from_confusion(cm_5)
+    miou_4, class_ious_4 = miou_from_confusion(cm_4)
 
     model.train()
-    return avg_loss, miou, class_ious
+    return avg_loss, miou_5, miou_4, class_ious_5, class_ious_4
 
 
 def train(cfg: dict, resume: str | None = None):
@@ -129,15 +115,20 @@ def train(cfg: dict, resume: str | None = None):
     with open(meta_path) as f:
         meta = json.load(f)
 
-    class_weights = meta.get("class_weights", [1.0, 1.0, 1.0, 1.0])
-    print(f"Class weights: {class_weights}")
+    if meta.get("format") != "precomputed_rili":
+        print(f"ERROR: Data format is '{meta.get('format')}'. Re-run preprocess_to_shards.py --force to generate precomputed ri/li shards.")
+        return
 
-    h, w = cfg["model"]["h"], cfg["model"]["w"]
-    max_range = cfg["train"]["max_range"]
+    num_classes = cfg["model"]["num_classes"]
+    class_weights = meta.get("class_weights", [1.0] * num_classes)
+    if len(class_weights) != num_classes:
+        print(f"WARNING: class_weights length {len(class_weights)} != num_classes {num_classes}, using ones")
+        class_weights = [1.0] * num_classes
+    print(f"Class weights: {class_weights}")
 
     model = RangeImageUNet(
         in_channels=cfg["model"]["in_channels"],
-        num_classes=cfg["model"]["num_classes"],
+        num_classes=num_classes,
         base_channels=cfg["model"]["base_channels"],
         use_groupnorm=cfg["model"].get("use_groupnorm", True),
         groups=cfg["model"].get("groups", 8),
@@ -147,7 +138,7 @@ def train(cfg: dict, resume: str | None = None):
     print(f"Model parameters: {n_params:,}")
 
     loss_fn = CombinedLoss(
-        num_classes=cfg["model"]["num_classes"],
+        num_classes=num_classes,
         class_weights=class_weights,
         ce_weight=cfg["train"]["loss"]["ce_weight"],
         lovasz_weight=cfg["train"]["loss"]["lovasz_weight"],
@@ -170,13 +161,7 @@ def train(cfg: dict, resume: str | None = None):
     warmup_steps = cfg["train"]["warmup_steps"]
     grad_clip = cfg["train"]["grad_clip"]
 
-    augment = RangeImageAugment(
-        cfg["train"].get("augmentation", {}),
-        h=h, w=w,
-        fov_top_deg=cfg["model"]["fov_top_deg"],
-        fov_bottom_deg=cfg["model"]["fov_bottom_deg"],
-        max_range=max_range,
-    )
+    augment = RangeImageAugment(cfg["train"].get("augmentation", {}))
 
     ckpt_dir = Path(cfg["checkpoint"]["dir"])
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -202,12 +187,17 @@ def train(cfg: dict, resume: str | None = None):
     elif best_path.exists():
         print(f"Found existing best checkpoint at {best_path}")
         ckpt = torch.load(str(best_path), map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model_state_dict"])
-        best_miou = ckpt.get("best_miou", 0.0)
-        print(f"  Loaded best_miou={best_miou:.4f} (fresh training)")
+        try:
+            model.load_state_dict(ckpt["model_state_dict"])
+            best_miou = ckpt.get("best_miou", 0.0)
+            print(f"  Loaded best_miou={best_miou:.4f} (fresh training)")
+        except RuntimeError as e:
+            print(f"  Checkpoint incompatible (likely num_classes changed): {e}")
+            print(f"  Starting fresh training from scratch")
 
-    train_loader = create_train_loader(processed_root, batch_size=batch_size, num_workers=2)
-    val_loader = create_val_loader(processed_root, batch_size=batch_size, num_workers=2)
+    num_workers = cfg["data"].get("num_workers", 0)
+    train_loader = create_train_loader(processed_root, batch_size=batch_size, num_workers=num_workers)
+    val_loader = create_val_loader(processed_root, batch_size=batch_size, num_workers=0)
 
     approx_steps_per_epoch = meta["n_train"] // batch_size
     total_steps = epochs * approx_steps_per_epoch
@@ -215,6 +205,7 @@ def train(cfg: dict, resume: str | None = None):
 
     print(f"\nTraining: {epochs} epochs, ~{approx_steps_per_epoch} steps/epoch, val every {val_every} steps")
     print(f"Effective batch size: {batch_size * grad_accum}")
+    print(f"Num classes: {num_classes} (train) -> 4 (binned eval)")
     print(f"Augmentation: enabled\n")
 
     log_every = 50
@@ -229,16 +220,21 @@ def train(cfg: dict, resume: str | None = None):
         t0 = time.time()
 
         for batch_idx, batch in enumerate(train_loader):
-            points, labels, proj = batch
+            ri_batch, li_batch = batch
+            ri_gpu = ri_batch.to(device, non_blocking=True)
+            li_gpu = li_batch.to(device, non_blocking=True)
 
-            range_img_batch, label_img_batch = build_batch(
-                points, labels, proj, device, augment, True, h, w, max_range,
-            )
+            ri_gpu, li_gpu = augment.batch_augment(ri_gpu, li_gpu)
 
             with torch.amp.autocast("cuda", enabled=True):
-                logits = model(range_img_batch)
-                loss = loss_fn(logits, label_img_batch)
+                logits = model(ri_gpu)
+                loss = loss_fn(logits, li_gpu)
                 loss = loss / grad_accum
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                optimizer.zero_grad(set_to_none=True)
+                global_step += 1
+                continue
 
             scaler.scale(loss).backward()
 
@@ -247,7 +243,7 @@ def train(cfg: dict, resume: str | None = None):
                 nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 scaler.step(optimizer)
                 scaler.update()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 scheduler.step(global_step)
 
             epoch_loss += loss.item() * grad_accum
@@ -269,28 +265,35 @@ def train(cfg: dict, resume: str | None = None):
                 torch.cuda.reset_peak_memory_stats(device)
 
             if global_step % val_every == 0 and global_step > 0:
-                val_loss, val_miou, class_ious = validate(
-                    model, val_loader, loss_fn, device, cfg, augment,
+                val_loss, miou_5, miou_4, ci_5, ci_4 = validate(
+                    model, val_loader, loss_fn, device, num_classes=num_classes,
                 )
                 lr_now = optimizer.param_groups[0]["lr"]
+                gc.collect()
+                torch.cuda.empty_cache()
 
-                print(f"  [Step {global_step}] val_loss={val_loss:.4f} val_miou={val_miou:.4f} lr={lr_now:.6f}")
-                class_names = ["drivable", "terrain", "static", "dynamic"]
-                for ci, cn in zip(class_ious, class_names):
-                    print(f"    {cn}: {ci:.4f}")
+                print(f"  [Step {global_step}] val_loss={val_loss:.4f} | miou_5class={miou_5:.4f} miou_4class={miou_4:.4f} | lr={lr_now:.6f}")
+                for ci, cn in zip(ci_5, CLASS_NAMES_5):
+                    v = f"{ci:.4f}" if not np.isnan(ci) else "N/A"
+                    print(f"    5cls {cn}: {v}")
+                for ci, cn in zip(ci_4, CLASS_NAMES_4):
+                    v = f"{ci:.4f}" if not np.isnan(ci) else "N/A"
+                    print(f"    4cls {cn}: {v}")
 
                 history_entry = {
                     "step": global_step,
                     "epoch": epoch,
                     "val_loss": val_loss,
-                    "val_miou": val_miou,
-                    "class_ious": dict(zip(class_names, class_ious)),
+                    "miou_5class": miou_5,
+                    "miou_4class": miou_4,
+                    "class_ious_5": dict(zip(CLASS_NAMES_5, [float(x) if not np.isnan(x) else None for x in ci_5])),
+                    "class_ious_4": dict(zip(CLASS_NAMES_4, [float(x) if not np.isnan(x) else None for x in ci_4])),
                 }
                 with open(history_path, "a") as f:
                     f.write(json.dumps(history_entry) + "\n")
 
-                if val_miou > best_miou:
-                    best_miou = val_miou
+                if miou_4 > best_miou:
+                    best_miou = miou_4
                     patience_counter = 0
                     torch.save({
                         "model_state_dict": model.state_dict(),
@@ -302,7 +305,7 @@ def train(cfg: dict, resume: str | None = None):
                         "config": cfg,
                         "class_weights": class_weights,
                     }, str(best_path))
-                    print(f"  *** New best miou: {best_miou:.4f} -> {best_path}")
+                    print(f"  *** New best miou_4class: {best_miou:.4f} -> {best_path}")
                 else:
                     patience_counter += 1
                     print(f"  No improvement ({patience_counter}/{patience})")
@@ -327,7 +330,7 @@ def train(cfg: dict, resume: str | None = None):
             "class_weights": class_weights,
         }, str(last_path))
 
-    print(f"\nTraining complete. Best mIoU: {best_miou:.4f}")
+    print(f"\nTraining complete. Best miou_4class: {best_miou:.4f}")
 
 
 def main():

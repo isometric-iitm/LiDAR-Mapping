@@ -1,0 +1,22 @@
+# Log-polar variable-resolution 2.5D grid engine parameters (PROJECT_SPEC §9)
+grid:
+  r_min: 0.5          # inner dead zone radius (m); points closer are ignored for grid
+  r_max: 100.0        # outer cutoff (m)
+  dr_0: 0.05          # first ring radial width (m) — "5 cm near"
+  alpha: 1.05         # geometric growth factor of ring width
+  n_theta: 720        # angular sectors (0.5 deg each)
+  z_min: -5.0         # elevation clamp (m) relative to sensor plane
+  z_max: 10.0
+  n_classes: 4        # canonical classes displayed in the dashboard
+
+decay:
+  tau_free: 1.5       # seconds for occupancy/dynamic decay constant (occupancy -> exp(-dt/tau))
+  frame_hz: 10.0
+  occupancy_gain: 0.3 # per-frame increase for freshly hit cells: occ += (1-occ)*gain
+  occ_threshold: 0.2  # rendered/occupied threshold
+  dyn_threshold: 0.5  # dynamic_score above this marks a cell DYNAMIC
+  dyn_change_boost: 0.2  # dynamic_score boost when cell occupancy state flips free->occupied
+
+memory:
+  uniform_cell_guess: 200.0  # uniform 5cm grid square side (m) used for equivalent count (spec says 200 m)
+  uniform_cell_size: 0.05

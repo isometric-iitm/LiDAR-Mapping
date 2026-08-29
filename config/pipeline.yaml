@@ -1,0 +1,22 @@
+# Live streaming pipeline configuration (PROJECT_SPEC §10/§11)
+source:
+  seq_dir: "F:/sih/dataset/sequences/08"
+  playback_speed: 1.0
+  loop: true
+
+model:
+  checkpoint: "F:/sih/checkpoints/best_miou.pt"
+  h: 64
+  w: 2048
+
+server:
+  host: "127.0.0.1"
+  port: 8000
+  snapshot_interval_frames: 20   # full snapshot cadence (frames)
+  stats_interval_frames: 2       # stats cadence (frames; drives Timeline position)
+  ckpt_dir: "F:/sih/checkpoints" # for /metrics/history
+  cloud_points_max: 30000        # downsampled points for the accumulated cloud view
+  cloud_history_frames: 30       # rolling world-anchored frames kept for accumulation
+
+dashboard:
+  url: "http://localhost:3000"

@@ -1,23 +1,12 @@
 import torch
 import numpy as np
-import struct
 import tarfile
 from pathlib import Path
 from torch.utils.data import IterableDataset, DataLoader
 from typing import Iterator
 
-
-def _decode_bin(data: bytes) -> np.ndarray:
-    return np.frombuffer(data, dtype=np.float32).reshape(-1, 4).copy()
-
-
-def _decode_label(data: bytes) -> np.ndarray:
-    return np.frombuffer(data, dtype=np.int64).copy()
-
-
-def _decode_proj(data: bytes) -> np.ndarray:
-    n = struct.unpack("<III", data[:12])[0]
-    return np.frombuffer(data[12:], dtype=np.int32).reshape(n, 2).copy()
+RI_SHAPE = (5, 64, 2048)
+LI_SHAPE = (64, 2048)
 
 
 def _iter_tar(tar_path: str | Path) -> Iterator[dict]:
@@ -26,9 +15,12 @@ def _iter_tar(tar_path: str | Path) -> Iterator[dict]:
         for member in tar:
             if not member.isfile():
                 continue
-            name = member.name
-            stem, ext = Path(name).stem, Path(name).suffix.lstrip(".")
-            key = int(stem)
+            stem = Path(member.name).stem
+            ext = Path(member.name).suffix.lstrip(".")
+            try:
+                key = int(stem)
+            except ValueError:
+                continue
             if key not in groups:
                 groups[key] = {}
             f = tar.extractfile(member)
@@ -36,14 +28,18 @@ def _iter_tar(tar_path: str | Path) -> Iterator[dict]:
                 continue
             groups[key][ext] = f.read()
 
+            if "ri" in groups[key] and "li" in groups[key]:
+                ri = np.frombuffer(groups[key]["ri"], dtype=np.float16).reshape(*RI_SHAPE).copy()
+                li = np.frombuffer(groups[key]["li"], dtype=np.uint8).reshape(*LI_SHAPE).copy()
+                del groups[key]
+                yield {"ri": ri, "li": li}
+
     for key in sorted(groups.keys()):
         g = groups[key]
-        if "bin" in g and "label" in g and "proj" in g:
-            yield {
-                "points": _decode_bin(g["bin"]),
-                "labels": _decode_label(g["label"]),
-                "proj": _decode_proj(g["proj"]),
-            }
+        if "ri" in g and "li" in g:
+            ri = np.frombuffer(g["ri"], dtype=np.float16).reshape(*RI_SHAPE).copy()
+            li = np.frombuffer(g["li"], dtype=np.uint8).reshape(*LI_SHAPE).copy()
+            yield {"ri": ri, "li": li}
 
 
 class ShardDataset(IterableDataset):
@@ -77,21 +73,19 @@ class ShardDataset(IterableDataset):
         return -1
 
 
-def _collate_fn(batch: list[dict]) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
-    points_list = []
-    labels_list = []
-    proj_list = []
+def _collate_fn(batch: list[dict]) -> tuple[torch.Tensor, torch.Tensor]:
+    ri_list = []
+    li_list = []
     for s in batch:
-        points_list.append(torch.from_numpy(s["points"].astype(np.float32)))
-        labels_list.append(torch.from_numpy(s["labels"].astype(np.int64)))
-        proj_list.append(torch.from_numpy(s["proj"].astype(np.int32)))
-    return points_list, labels_list, proj_list
+        ri_list.append(torch.from_numpy(s["ri"].astype(np.float32)))
+        li_list.append(torch.from_numpy(s["li"].astype(np.int64)))
+    return torch.stack(ri_list), torch.stack(li_list)
 
 
 def create_train_loader(
     processed_root: str,
     batch_size: int = 4,
-    num_workers: int = 2,
+    num_workers: int = 0,
     shuffle_buffer: int = 200,
 ) -> DataLoader:
     ds = ShardDataset(
@@ -105,14 +99,15 @@ def create_train_loader(
         num_workers=num_workers,
         collate_fn=_collate_fn,
         persistent_workers=num_workers > 0,
-        pin_memory=True,
+        pin_memory=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
 
 
 def create_val_loader(
     processed_root: str,
     batch_size: int = 4,
-    num_workers: int = 2,
+    num_workers: int = 0,
 ) -> DataLoader:
     ds = ShardDataset(
         Path(processed_root) / "val",
@@ -125,5 +120,6 @@ def create_val_loader(
         num_workers=num_workers,
         collate_fn=_collate_fn,
         persistent_workers=num_workers > 0,
-        pin_memory=True,
+        pin_memory=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
