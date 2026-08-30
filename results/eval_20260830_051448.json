@@ -1,0 +1,382 @@
+{
+  "timestamp": "2026-08-29T23:40:41.677077+00:00",
+  "device": "cuda",
+  "precision": "fp16",
+  "config": "train_range_image",
+  "pixel": {
+    "n_samples": 50,
+    "miou_5class": 0.6843388295145045,
+    "miou_4class": 0.8467221873057853,
+    "class_ious_5": {
+      "drivable": 0.9000011260442781,
+      "terrain_nondrivable": 0.8863765972979449,
+      "static_obstacle": 0.7012023760979534,
+      "dynamic_vehicle": 0.9057164822094255,
+      "dynamic_pedestrian": 0.028397565922920892
+    },
+    "class_ious_4": {
+      "drivable": 0.9000011260442781,
+      "terrain_nondrivable": 0.8863765972979449,
+      "static_obstacle": 0.7012023760979534,
+      "dynamic_object": 0.8993086497829649
+    },
+    "per_distance_band_5class": {
+      "0-5m": {
+        "miou": 0.6479185661413001,
+        "class_ious": {
+          "drivable": 0.8739745805350776,
+          "terrain_nondrivable": 0.9067003688824504,
+          "static_obstacle": 0.48911762973434647,
+          "dynamic_vehicle": 0.9698002515546251,
+          "dynamic_pedestrian": 0.0
+        }
+      },
+      "5-10m": {
+        "miou": 0.6919155894479967,
+        "class_ious": {
+          "drivable": 0.9244454374588534,
+          "terrain_nondrivable": 0.906934016684772,
+          "static_obstacle": 0.7332358143723018,
+          "dynamic_vehicle": 0.8588576459012998,
+          "dynamic_pedestrian": 0.036105032822757115
+        }
+      },
+      "10-20m": {
+        "miou": 0.6769241663947045,
+        "class_ious": {
+          "drivable": 0.8773659109690651,
+          "terrain_nondrivable": 0.8689700826410984,
+          "static_obstacle": 0.771429344841721,
+          "dynamic_vehicle": 0.8416982608172353,
+          "dynamic_pedestrian": 0.025157232704402517
+        }
+      },
+      "20-40m": {
+        "miou": 0.5875947743759051,
+        "class_ious": {
+          "drivable": 0.7868195083034158,
+          "terrain_nondrivable": 0.8079634842024838,
+          "static_obstacle": 0.6181377100242594,
+          "dynamic_vehicle": 0.6859811302773278,
+          "dynamic_pedestrian": 0.03907203907203907
+        }
+      },
+      "40-80m": {
+        "miou": 0.46617508877830327,
+        "class_ious": {
+          "drivable": 0.731920961499287,
+          "terrain_nondrivable": 0.7596945868000083,
+          "static_obstacle": 0.4580959684487292,
+          "dynamic_vehicle": 0.3811639271434918,
+          "dynamic_pedestrian": 0.0
+        }
+      }
+    },
+    "per_distance_band_4class": {
+      "0-5m": {
+        "miou": 0.8092274467851444,
+        "class_ious": {
+          "drivable": 0.8739745805350776,
+          "terrain_nondrivable": 0.9067003688824504,
+          "static_obstacle": 0.48911762973434647,
+          "dynamic_object": 0.9671172079887028
+        }
+      },
+      "5-10m": {
+        "miou": 0.8529241540062477,
+        "class_ious": {
+          "drivable": 0.9244454374588534,
+          "terrain_nondrivable": 0.906934016684772,
+          "static_obstacle": 0.7332358143723018,
+          "dynamic_object": 0.8470813475090635
+        }
+      },
+      "10-20m": {
+        "miou": 0.838350990082522,
+        "class_ious": {
+          "drivable": 0.8773659109690651,
+          "terrain_nondrivable": 0.8689700826410984,
+          "static_obstacle": 0.771429344841721,
+          "dynamic_object": 0.8356386218782035
+        }
+      },
+      "20-40m": {
+        "miou": 0.7219345298897275,
+        "class_ious": {
+          "drivable": 0.7868195083034158,
+          "terrain_nondrivable": 0.8079634842024838,
+          "static_obstacle": 0.6181377100242594,
+          "dynamic_object": 0.6748174170287511
+        }
+      },
+      "40-80m": {
+        "miou": 0.5818212212807424,
+        "class_ious": {
+          "drivable": 0.731920961499287,
+          "terrain_nondrivable": 0.7596945868000083,
+          "static_obstacle": 0.4580959684487292,
+          "dynamic_object": 0.37757336837494526
+        }
+      }
+    },
+    "confusion_5class": [
+      [
+        879185,
+        54574,
+        77,
+        5488,
+        12
+      ],
+      [
+        35235,
+        2385820,
+        122838,
+        8278,
+        202
+      ],
+      [
+        84,
+        76384,
+        509000,
+        5110,
+        133
+      ],
+      [
+        2199,
+        7394,
+        9892,
+        374646,
+        261
+      ],
+      [
+        17,
+        930,
+        2378,
+        378,
+        126
+      ]
+    ],
+    "confusion_4class": [
+      [
+        879185,
+        54574,
+        77,
+        5500
+      ],
+      [
+        35235,
+        2385820,
+        122838,
+        8480
+      ],
+      [
+        84,
+        76384,
+        509000,
+        5243
+      ],
+      [
+        2216,
+        8324,
+        12270,
+        375411
+      ]
+    ],
+    "latency_ms": {
+      "mean": 1108.2696500001475,
+      "std": 7661.7986722388405,
+      "min": 8.831300001475029,
+      "max": 54740.580800003954
+    }
+  },
+  "point": {
+    "n_scans": 50,
+    "miou_5class": 0.5255796624458783,
+    "miou_4class": 0.6533352392311778,
+    "class_ious_5": {
+      "drivable": 0.8903746319032897,
+      "terrain_nondrivable": 0.8567853966923062,
+      "static_obstacle": 0.4641481274351429,
+      "dynamic_vehicle": 0.4117906079208434,
+      "dynamic_pedestrian": 0.004799548277809147
+    },
+    "class_ious_4": {
+      "drivable": 0.8903746319032897,
+      "terrain_nondrivable": 0.8567853966923062,
+      "static_obstacle": 0.4641481274351429,
+      "dynamic_object": 0.40203280089397225
+    },
+    "per_distance_band_5class": {
+      "0-5m": {
+        "miou": 0.6686086634711346,
+        "class_ious": {
+          "drivable": 0.9026194581571675,
+          "terrain_nondrivable": 0.890090757909008,
+          "static_obstacle": 0.8817244378183625,
+          "dynamic_vehicle": 0.0,
+          "dynamic_pedestrian": null
+        }
+      },
+      "5-10m": {
+        "miou": 0.4927666865293805,
+        "class_ious": {
+          "drivable": 0.9384968724831204,
+          "terrain_nondrivable": 0.9250698172848644,
+          "static_obstacle": 0.6002667428789178,
+          "dynamic_vehicle": 0.0,
+          "dynamic_pedestrian": 0.0
+        }
+      },
+      "10-20m": {
+        "miou": 0.5097543679182261,
+        "class_ious": {
+          "drivable": 0.8390379879486508,
+          "terrain_nondrivable": 0.8439695904384198,
+          "static_obstacle": 0.27818472040833064,
+          "dynamic_vehicle": 0.5814740022000033,
+          "dynamic_pedestrian": 0.006105538595726123
+        }
+      },
+      "20-40m": {
+        "miou": 0.45441467380664546,
+        "class_ious": {
+          "drivable": 0.7168329696558835,
+          "terrain_nondrivable": 0.8038519396507947,
+          "static_obstacle": 0.47793955658809156,
+          "dynamic_vehicle": 0.26927004814472594,
+          "dynamic_pedestrian": 0.004178854993731718
+        }
+      },
+      "40-80m": {
+        "miou": 0.3835710824046446,
+        "class_ious": {
+          "drivable": 0.4956455567768665,
+          "terrain_nondrivable": 0.7460976110551372,
+          "static_obstacle": 0.5450236531483948,
+          "dynamic_vehicle": 0.13108859104282444,
+          "dynamic_pedestrian": 0.0
+        }
+      }
+    },
+    "per_distance_band_4class": {
+      "0-5m": {
+        "miou": 0.6686086634711346,
+        "class_ious": {
+          "drivable": 0.9026194581571675,
+          "terrain_nondrivable": 0.890090757909008,
+          "static_obstacle": 0.8817244378183625,
+          "dynamic_object": 0.0
+        }
+      },
+      "5-10m": {
+        "miou": 0.6159583581617256,
+        "class_ious": {
+          "drivable": 0.9384968724831204,
+          "terrain_nondrivable": 0.9250698172848644,
+          "static_obstacle": 0.6002667428789178,
+          "dynamic_object": 0.0
+        }
+      },
+      "10-20m": {
+        "miou": 0.6325019524803395,
+        "class_ious": {
+          "drivable": 0.8390379879486508,
+          "terrain_nondrivable": 0.8439695904384198,
+          "static_obstacle": 0.27818472040833064,
+          "dynamic_object": 0.5688155111259563
+        }
+      },
+      "20-40m": {
+        "miou": 0.566060805430666,
+        "class_ious": {
+          "drivable": 0.7168329696558835,
+          "terrain_nondrivable": 0.8038519396507947,
+          "static_obstacle": 0.47793955658809156,
+          "dynamic_object": 0.26561875582789396
+        }
+      },
+      "40-80m": {
+        "miou": 0.47945314315359633,
+        "class_ious": {
+          "drivable": 0.4956455567768665,
+          "terrain_nondrivable": 0.7460976110551372,
+          "static_obstacle": 0.5450236531483948,
+          "dynamic_object": 0.13104575163398693
+        }
+      }
+    },
+    "confusion_5class": [
+      [
+        1696226,
+        23791,
+        771,
+        10319,
+        15
+      ],
+      [
+        170648,
+        3053267,
+        106110,
+        16373,
+        25
+      ],
+      [
+        514,
+        180437,
+        275542,
+        25403,
+        4
+      ],
+      [
+        2739,
+        7813,
+        4279,
+        47694,
+        0
+      ],
+      [
+        47,
+        5167,
+        591,
+        1201,
+        34
+      ]
+    ],
+    "confusion_4class": [
+      [
+        1696226,
+        23791,
+        771,
+        10334
+      ],
+      [
+        170648,
+        3053267,
+        106110,
+        16398
+      ],
+      [
+        514,
+        180437,
+        275542,
+        25407
+      ],
+      [
+        2786,
+        12980,
+        4870,
+        48929
+      ]
+    ],
+    "latency_ms": {
+      "mean": 24.854030000278726,
+      "std": 36.18694538736229,
+      "min": 17.813600003137253,
+      "max": 277.61150000151247
+    }
+  },
+  "memory": {
+    "peak_rss_mb": 5876.659798,
+    "gpu_peak_mb": 323.51488
+  }
+}
