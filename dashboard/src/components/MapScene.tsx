@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable react-hooks/immutability */
 
 import { useFrame, useThree } from "@react-three/fiber";
 import { useLayoutEffect, useMemo, useRef } from "react";
@@ -511,21 +512,26 @@ export function GroundPlane({ maxR }: { maxR: number }) {
 
 export function PerfOverlay({ onStats }: { onStats?: (s: { fps: number; js: number; draws: number; tris: number }) => void }) {
   const gl = useThree((s) => s.gl);
-  const last = useRef(performance.now());
+  const last = useRef<number | null>(null);
   const acc = useRef({ n: 0, sumFps: 0, sumJs: 0 });
   const t0 = useRef(0);
   useLayoutEffect(() => {
     const orig = gl.render.bind(gl);
-    // wrap render to time JS (buffer upload + draw)
     gl.render = ((scene: THREE.Scene, camera: THREE.Camera) => {
       t0.current = performance.now();
       orig(scene, camera);
       const dt = performance.now() - t0.current;
       acc.current.sumJs += dt;
-    }) as typeof gl.render;
-    return () => { gl.render = orig; };
+    }) as unknown as typeof gl.render;
+    return () => {
+      gl.render = orig;
+    };
   }, [gl]);
   useFrame(() => {
+    if (last.current === null) {
+      last.current = performance.now();
+      return;
+    }
     const now = performance.now();
     const dt = now - last.current;
     last.current = now;
@@ -536,7 +542,6 @@ export function PerfOverlay({ onStats }: { onStats?: (s: { fps: number; js: numb
       const avgFps = acc.current.sumFps / acc.current.n;
       const avgJs = acc.current.sumJs / acc.current.n;
       onStats?.({ fps: avgFps, js: avgJs, draws: info.calls, tris: info.triangles });
-      // also console for backend correlation
       console.log(`[perf] fps=${avgFps.toFixed(1)} js=${avgJs.toFixed(2)}ms draws=${info.calls} tris=${(info.triangles/1000).toFixed(1)}k`);
       acc.current = { n: 0, sumFps: 0, sumJs: 0 };
     }

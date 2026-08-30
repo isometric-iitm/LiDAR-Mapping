@@ -226,19 +226,23 @@ class LogPolarGrid:
             self._z_min_state[uniq] = zmin_c.astype(np.float32)
             self._z_max_state[uniq] = zmax_c.astype(np.float32)
             self._ever_seen[uniq] = True
-            # trav: per-hit compute (no full-grid O(n) slope) — class+height based
-            z_diff_u = np.maximum(zmax_c - (zsum_c / seg_count), 0.0)
-            z_score_u = np.clip(1.0 - z_diff_u / (self.trav_z_diff_thresh * 3), 0, 1)
+            # trav: per-hit compute using absolute height above ground + class.
+            # Intra-cell z_diff is ~0 for single-point precise cells, so use height.
+            height_u = zmax_c.astype(np.float32) - float(self.ground_z)
+            # height 0-0.3m => drivable flat, 0.3-1.0m => curb/caution, >1.0m => blocked
+            z_score_u = np.clip(1.0 - np.maximum(height_u, 0.0) / (self.trav_z_diff_thresh * 2.5), 0, 1)
             cls_u = self.dominant_class[uniq]
             lut = np.zeros(256, dtype=np.float32)
             for ci, sc in enumerate(self.trav_class_scores):
                 if ci < 256:
                     lut[ci] = sc
             cls_score_u = lut[cls_u]
-            # slope skipped in precise (single-point cells have no intra-cell slope); use 1.0
+            # estimate slope from per-cell height vs neighbor ground (skip full O(n) slope);
+            # use height itself as proxy: tall => steep => slope_score low
+            slope_score_u = np.clip(1.0 - np.maximum(height_u - 0.15, 0.0) / self.trav_slope_thresh, 0, 1)
             occ_score_u = np.clip(float(self.occ_gain), 0, 1)
             w_z, w_s, w_c, w_o = self.trav_weights
-            trav_u = (w_z * z_score_u + w_s * 1.0 + w_c * cls_score_u + w_o * occ_score_u) / (w_z + w_s + w_c + w_o)
+            trav_u = (w_z * z_score_u + w_s * slope_score_u + w_c * cls_score_u + w_o * occ_score_u) / (w_z + w_s + w_c + w_o)
             self.traversability[uniq] = trav_u.astype(np.float32)
             # cells freed this frame must have their ever_seen cleared so next
             # hit is treated as first-seen (already handled by occupancy free,

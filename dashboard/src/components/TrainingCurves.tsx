@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import {
   CartesianGrid,
@@ -195,9 +196,9 @@ export default function TrainingCurves() {
     <div className="mx-auto max-w-6xl space-y-6 p-6">
       <header>
         <p className="mb-2 text-xs text-zinc-500">
-          <a href="/" className="text-zinc-400 transition-colors hover:text-zinc-200">
+          <Link href="/" className="text-zinc-400 transition-colors hover:text-zinc-200">
             ← Live map
-          </a>
+          </Link>
         </p>
         <h1 className="text-xl font-semibold">Training curves</h1>
         <p className="mt-1 text-sm text-zinc-500">

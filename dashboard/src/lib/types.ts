@@ -34,6 +34,8 @@ export type Stats = {
   epoch?: number;
   frames_emitted?: number;
   frames_dropped?: number;
+  rendered_cells?: number;
+  capacity_compression?: number;
 };
 
 export type SnapshotMsg = {

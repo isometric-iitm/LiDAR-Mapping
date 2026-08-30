@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable react-hooks/immutability */
 
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
@@ -37,7 +38,7 @@ function DemandInvalidator({ patch, camMode }: { patch: unknown; camMode: string
   const invalidate = useThree((s) => s.invalidate);
   useEffect(() => {
     invalidate();
-  }, [patch, camMode]);
+  }, [patch, camMode, invalidate]);
   return null;
 }
 
@@ -49,8 +50,12 @@ function OrthoAutoFit({ maxR }: { maxR: number }) {
     if (!(cam as THREE.OrthographicCamera).isOrthographicCamera) return;
     const o = cam as THREE.OrthographicCamera;
     const worldDiameter = 2 * maxR;
-    const zoom = Math.min(size.width, size.height) / (worldDiameter * 1.08) / 1.5;
-    o.zoom = Math.max(0.8, Math.min(6, zoom));
+    const viewportLarger = Math.max(size.width, size.height);
+    const viewportSmaller = Math.min(size.width, size.height);
+    const zoomFill = viewportLarger / (worldDiameter * 1.04);
+    const zoomFit = viewportSmaller / (worldDiameter * 1.08);
+    const zoom = Math.min(zoomFill, zoomFit * 1.6);
+    o.zoom = Math.max(1.2, Math.min(7, zoom));
     o.updateProjectionMatrix();
     invalidate();
   }, [size.width, size.height, maxR, cam, invalidate]);
