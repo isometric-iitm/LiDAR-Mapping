@@ -2,15 +2,20 @@
 
 import { useRef, useState } from "react";
 
+type SeqInfo = { id: string; frames: number; has_poses: boolean; has_labels: boolean };
+
 type Props = {
   seqPos: number;
   seqLen: number;
   paused: boolean;
   speed: number;
   seeking: boolean;
+  seqId: string;
+  availableSeqs: SeqInfo[];
   onPause: (p: boolean) => void;
   onSeek: (idx: number) => void;
   onSpeed: (s: number) => void;
+  onSwitchSeq: (seqId: string) => void;
 };
 
 const fmt = (sec: number) => {
@@ -21,7 +26,7 @@ const fmt = (sec: number) => {
 
 const SPEEDS = [0.5, 1, 2, 4];
 
-export default function Timeline({ seqPos, seqLen, paused, speed, seeking, onPause, onSeek, onSpeed }: Props) {
+export default function Timeline({ seqPos, seqLen, paused, speed, seeking, seqId, availableSeqs, onPause, onSeek, onSpeed, onSwitchSeq }: Props) {
   const [dragging, setDragging] = useState(false);
   const [scrubFrac, setScrubFrac] = useState<number | null>(null);
   const trackRef = useRef<HTMLDivElement>(null);
@@ -121,6 +126,19 @@ export default function Timeline({ seqPos, seqLen, paused, speed, seeking, onPau
       <div className="hidden shrink-0 font-mono text-zinc-500 sm:block">
         {seeking ? "loading" : `${shownPos.toLocaleString()} / ${seqLen.toLocaleString()}`}
       </div>
+      <select
+        value={seqId}
+        onChange={(e) => onSwitchSeq(e.target.value)}
+        disabled={seeking}
+        className="shrink-0 rounded-lg bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-300 outline-none transition-colors hover:bg-zinc-700 focus:ring-1 focus:ring-zinc-500 disabled:cursor-wait disabled:opacity-60"
+        title="Sequence"
+      >
+        {availableSeqs.map((s) => (
+          <option key={s.id} value={s.id}>
+            Seq {s.id}
+          </option>
+        ))}
+      </select>
       <select
         value={speed}
         onChange={(e) => onSpeed(Number(e.target.value))}

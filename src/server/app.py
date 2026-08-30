@@ -30,6 +30,8 @@ class Pipeline:
         # seq_dir and checkpoint may be relative to the repo root — resolve them
         # so we don't depend on the process CWD.
         seq_dir = resolve_path(src["seq_dir"])
+        self.seq_base_dir = seq_dir.parent
+        self.seq_id = seq_dir.name
         checkpoint = resolve_path(mdl["checkpoint"])
         self.replayer = SemanticKITTIReplayer(
             seq_dir, playback_speed=src["playback_speed"], loop=src["loop"]
@@ -71,9 +73,10 @@ class Pipeline:
         # rolling world-frame cloud history (for the ego-anchored accumulation view)
         self.cloud_history_frames = int(self.cfg["server"].get("cloud_history_frames", 30))
         self._cloud_hist: deque = deque(maxlen=self.cloud_history_frames)
-        self._pose_mats = _load_pose_mats(src["seq_dir"])
+        self._pose_mats = _load_pose_mats(seq_dir)
         self.epoch = 0  # bumped on seek so clients can drop stale in-flight frames
         self._seek_lock = threading.Lock()
+        self._replayer_lock = threading.Lock()
         self._preview = False  # process exactly one frame on the next loop pass
 
     def start(self):
@@ -128,6 +131,52 @@ class Pipeline:
         self.epoch += 1
         with self._seek_lock:
             self._preview = True
+
+    def switch_sequence(self, seq_id: str):
+        """Swap the replayer to a different SemanticKITTI sequence.
+
+        Similar to seek() but also rebuilds the replayer and pose mats for the
+        new sequence directory. The pipeline is paused during the swap so the
+        background thread doesn't read a half-initialised replayer.
+        """
+        new_dir = self.seq_base_dir / seq_id
+        if not (new_dir / "velodyne").exists():
+            print(f"[pipeline] switch_sequence: {new_dir}/velodyne not found, ignoring")
+            return
+        was_paused = not self.pause_event.is_set()
+        self.pause_event.clear()
+        time.sleep(0.05)
+        with self._replayer_lock:
+            with self.grid_lock:
+                self.grid.reset()
+                self._last_snapshot_frame = self.grid.frame - self._snap_iv
+                self._last_stats_frame = self.grid.frame - self._stats_iv
+                self._mem = None
+            self.replayer = SemanticKITTIReplayer(
+                new_dir,
+                playback_speed=self.speed,
+                loop=self.cfg["source"]["loop"],
+            )
+            self._pose_mats = _load_pose_mats(new_dir)
+            self.seq_id = seq_id
+        self._cloud_hist.clear()
+        self._frame_time_window.clear()
+        for buf in self._stage_window.values():
+            buf.clear()
+        self._frames_emitted = 0
+        self._frames_dropped = 0
+        self._perf_n = 0
+        self._perf_sum = {"seg": 0.0, "grid": 0.0, "pack": 0.0, "proc": 0.0}
+        while True:
+            try:
+                self.messages.get_nowait()
+            except queue.Empty:
+                break
+        self.epoch += 1
+        with self._seek_lock:
+            self._preview = True
+        if not was_paused:
+            self.pause_event.set()
 
     def _take_preview(self) -> bool:
         with self._seek_lock:
@@ -188,13 +237,15 @@ class Pipeline:
     def _loop_step(self, stats_iv: int, snap_iv: int):
         # A seek preview must render even while paused: check before blocking.
         if self._take_preview():
-            frame = self.replayer.get(timeout=2.0)
+            with self._replayer_lock:
+                frame = self.replayer.get(timeout=2.0)
             if frame is not None:
                 self._process_frame(frame, stats_iv, snap_iv)
             return
         if not self.pause_event.wait(timeout=0.25):
             return  # paused: retry at the top of the loop (still sees seeks)
-        frame = self.replayer.get(timeout=2.0)
+        with self._replayer_lock:
+            frame = self.replayer.get(timeout=2.0)
         if frame is None:
             time.sleep(0.05)
             return
@@ -517,11 +568,31 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         with open(jsons[-1], encoding="utf-8") as f:
             return json.load(f)
 
+    @app.get("/sequences")
+    async def list_sequences():
+        base = pipeline.seq_base_dir
+        seqs = []
+        if base.is_dir():
+            for d in sorted(base.iterdir()):
+                if d.is_dir() and (d / "velodyne").is_dir():
+                    n_bins = len(list((d / "velodyne").glob("*.bin")))
+                    has_poses = (d / "poses.txt").is_file()
+                    has_labels = (d / "labels").is_dir()
+                    seqs.append({
+                        "id": d.name,
+                        "frames": n_bins,
+                        "has_poses": has_poses,
+                        "has_labels": has_labels,
+                    })
+        return {"current": pipeline.seq_id, "sequences": seqs}
+
     @app.websocket("/ws/map")
     async def ws_map(ws: WebSocket):
         await ws.accept()
         connections.add(ws)
         meta = ws_protocol.grid_meta_message(pipeline.grid)
+        meta["seq_id"] = pipeline.seq_id
+        meta["seq_len"] = len(pipeline.replayer)
         await ws.send_text(json.dumps(meta))
         try:
             while True:
@@ -552,6 +623,16 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                         await ws.send_text(json.dumps({
                             "type": "control_ack", "action": "seek",
                             "frame": pipeline.grid.frame, "idx": pipeline.replayer.i,
+                            "epoch": pipeline.epoch}))
+                    elif action == "switch_sequence":
+                        seq_id = data.get("value", "")
+                        print(f"[ws] switch_sequence -> {seq_id}")
+                        pipeline.switch_sequence(seq_id)
+                        await ws.send_text(json.dumps({
+                            "type": "control_ack", "action": "switch_sequence",
+                            "seq_id": pipeline.seq_id,
+                            "seq_len": len(pipeline.replayer),
+                            "frame": pipeline.grid.frame,
                             "epoch": pipeline.epoch}))
                 elif data.get("type") == "request_snapshot":
                     with pipeline.grid_lock:

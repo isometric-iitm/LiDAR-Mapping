@@ -136,6 +136,10 @@ function hoverInfo(cell: CellInfo, gridEdges: number[], nTheta: number): {
   };
 }
 
+type SeqInfo = { id: string; frames: number; has_poses: boolean; has_labels: boolean };
+
+const API = process.env.NEXT_PUBLIC_PC2D_API ?? "http://localhost:8000";
+
 export default function Home() {
   const {
     meta,
@@ -150,6 +154,8 @@ export default function Home() {
     seeking,
     seekTo,
     send,
+    seqId,
+    switchSequence,
   } = useMapStream();
   const [paused, setPaused] = useState(true);
   const [speed, setSpeed] = useState(1);
@@ -158,6 +164,7 @@ export default function Home() {
   const [hover, setHover] = useState<ReturnType<typeof hoverInfo> | null>(null);
   const [camMode, setCamMode] = useState<CamMode>("persp");
   const [animTarget, setAnimTarget] = useState<{ pos: THREE.Vector3; look: THREE.Vector3 } | null>(null);
+  const [availableSeqs, setAvailableSeqs] = useState<SeqInfo[]>([]);
 
   const maxR = meta?.r_max ?? 100;
   const gridEdges = meta ? computeGridEdges(meta) : [];
@@ -207,6 +214,13 @@ export default function Home() {
     if (needsCloud && !cloudOn) setCloudOn(true);
     else if (!needsCloud && cloudOn) setCloudOn(false);
   };
+
+  useEffect(() => {
+    fetch(`${API}/sequences`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText)))
+      .then((data) => setAvailableSeqs(data.sequences ?? []))
+      .catch(() => {});
+  }, []);
 
   const showCloud = viewMode === "seg" || viewMode === "raw" || viewMode === "compare";
   const gridOpacity = viewMode === "compare" ? 0.35 : 1;
@@ -359,9 +373,12 @@ export default function Home() {
             paused={paused}
             speed={speed}
             seeking={seeking}
+            seqId={seqId}
+            availableSeqs={availableSeqs}
             onPause={handlePause}
             onSeek={handleSeek}
             onSpeed={handleSpeed}
+            onSwitchSeq={switchSequence}
           />
         </div>
 

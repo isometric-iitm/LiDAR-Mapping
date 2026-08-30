@@ -11,6 +11,8 @@ export type GridMeta = {
   n_theta: number;
   n_classes: number;
   class_colors: Record<string, string>;
+  seq_id?: string;
+  seq_len?: number;
 };
 
 export type Stats = {
@@ -68,10 +70,12 @@ export type CloudMsg = {
 
 export type AckMsg = {
   type: "control_ack";
-  action: "pause" | "play" | "speed" | "seek";
+  action: "pause" | "play" | "speed" | "seek" | "switch_sequence";
   frame: number;
   idx?: number;
   epoch?: number;
+  seq_id?: string;
+  seq_len?: number;
 };
 
 export type DoneMsg = {

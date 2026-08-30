@@ -30,6 +30,8 @@ export type UseMapStream = {
   seeking: boolean;
   seekTo: (idx: number) => void;
   send: (msg: object) => void;
+  seqId: string;
+  switchSequence: (seqId: string) => void;
 };
 
 const WS_URL = process.env.NEXT_PUBLIC_PC2D_WS ?? "ws://localhost:8000/ws/map";
@@ -115,6 +117,7 @@ export function useMapStream(): UseMapStream {
   const [seeking, setSeeking] = useState(false);
   const [heading, setHeading] = useState(0);
   const [patch, setPatch] = useState<CellPatch | null>(null);
+  const [seqId, setSeqId] = useState("");
 
   const wsRef = useRef<WebSocket | null>(null);
   const full = useRef<Map<string, Cell>>(new Map());
@@ -174,6 +177,7 @@ export function useMapStream(): UseMapStream {
           setSeeking(false);
           setCells(new Map());
           setPatch({ kind: "reset", frame: 0 });
+          if ("seq_id" in msg && typeof msg.seq_id === "string") setSeqId(msg.seq_id);
           return;
         }
 
@@ -184,6 +188,17 @@ export function useMapStream(): UseMapStream {
             epochRef.current = msg.epoch ?? epochRef.current;
             freezeFrame.current = -1;
             setSeeking(false);
+            full.current.clear();
+            snapBuf.current.clear();
+            deltaAcc.current = [];
+            setCells(new Map());
+            setCloud(null);
+            setPatch({ kind: "reset", frame: msg.frame ?? 0 });
+          } else if (msg.action === "switch_sequence") {
+            epochRef.current = msg.epoch ?? epochRef.current;
+            freezeFrame.current = -1;
+            setSeeking(false);
+            setSeqId(msg.seq_id ?? "");
             full.current.clear();
             snapBuf.current.clear();
             deltaAcc.current = [];
@@ -331,6 +346,11 @@ export function useMapStream(): UseMapStream {
     sendRef.current({ type: "control", action: "seek", value: idx });
   }, []);
 
+  const switchSequence = useCallback((newSeqId: string) => {
+    setSeeking(true);
+    sendRef.current({ type: "control", action: "switch_sequence", value: newSeqId });
+  }, []);
+
   return {
     conn,
     meta,
@@ -346,5 +366,7 @@ export function useMapStream(): UseMapStream {
     seeking,
     seekTo,
     send,
+    seqId,
+    switchSequence,
   };
 }
