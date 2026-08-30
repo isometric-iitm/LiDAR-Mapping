@@ -48,11 +48,11 @@ export default function Timeline({ seqPos, seqLen, paused, speed, seeking, onPau
   };
 
   return (
-    <div className="pointer-events-auto absolute bottom-4 left-1/2 flex w-[min(720px,94%)] -translate-x-1/2 items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/90 px-4 py-2 text-xs text-zinc-200 shadow-lg shadow-black/40 backdrop-blur">
+    <div className="frost pointer-events-auto absolute inset-x-0 bottom-4 mx-auto flex w-[min(720px,94%)] items-center gap-3 px-4 py-2 text-xs text-zinc-200">
       <button
         onClick={() => onPause(!paused)}
         disabled={seeking}
-        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-zinc-800 text-zinc-200 transition-colors hover:bg-zinc-700 disabled:cursor-wait disabled:opacity-60"
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-800 text-zinc-200 transition-colors hover:bg-zinc-700 disabled:cursor-wait disabled:opacity-60"
         title={seeking ? "Loading…" : paused ? "Resume playback" : "Freeze playback"}
       >
         {seeking ? (
@@ -124,7 +124,7 @@ export default function Timeline({ seqPos, seqLen, paused, speed, seeking, onPau
       <select
         value={speed}
         onChange={(e) => onSpeed(Number(e.target.value))}
-        className="shrink-0 rounded-md bg-zinc-800 px-1.5 py-1 font-mono text-[11px] text-zinc-300 outline-none transition-colors hover:bg-zinc-700 focus:ring-1 focus:ring-zinc-500"
+        className="shrink-0 rounded-lg bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-300 outline-none transition-colors hover:bg-zinc-700 focus:ring-1 focus:ring-zinc-500"
         title="Playback speed"
       >
         {SPEEDS.map((s) => (

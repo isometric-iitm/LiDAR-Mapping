@@ -1,20 +1,122 @@
 @import "tailwindcss";
 
 :root {
-  --background: #09090b;
+  --background: #000000;
   --foreground: #ededed;
+  --radius: 5px;
+
+  /* HUD accent */
+  --hud-cyan: #22d3ee;
+  --hud-muted: #71717a;
+  --hud-dim: #a1a1aa;
+
+  /* hairline + surfaces */
+  --hairline: rgba(255, 255, 255, 0.1);
+  --panel: rgba(18, 18, 20, 0.55);
+
   color-scheme: dark;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-jetbrains-mono);
+  --radius-lg: var(--radius);
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   HUD DESIGN SYSTEM (global — no per-element arbitrary values)
+   ───────────────────────────────────────────────────────────── */
+
+/* Frosted-glass panel: strong blur + translucency + hairline */
+.frost {
+  background: var(--panel);
+  backdrop-filter: blur(18px) saturate(1.4);
+  -webkit-backdrop-filter: blur(18px) saturate(1.4);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+/* Primary readout — big tabular mono numeral */
+.hud-num {
+  font-family: var(--font-jetbrains-mono), ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 1.5rem;
+  line-height: 1;
+  font-weight: 600;
+  color: var(--foreground);
+}
+.hud-num--accent {
+  color: var(--hud-cyan);
+}
+
+/* Micro label under a readout */
+.hud-cap {
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-weight: 500;
+  color: var(--hud-muted);
+}
+
+/* Section heading */
+.hud-sec {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--hud-muted);
+}
+
+/* Small label (row / pipeline stage / bar label) */
+.hud-label {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 500;
+  color: var(--hud-muted);
+}
+
+/* Mono value */
+.hud-val {
+  font-family: var(--font-jetbrains-mono), ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--dim, var(--hud-dim));
+}
+
+/* Accent vertical rail used for grouped rows */
+.hud-rail {
+  border-left: 2px solid rgba(34, 211, 238, 0.25);
+  padding-left: 12px;
+}
+
+/* Announcement value / summary */
+.hud-big {
+  font-family: var(--font-jetbrains-mono), ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--hud-cyan);
+}
+
+/* Thin progress/bar track + fill */
+.hud-bar {
+  height: 4px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: #27272a;
+}
+.hud-bar__fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.3s ease;
 }

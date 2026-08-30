@@ -1,9 +1,9 @@
 "use client";
 /* eslint-disable react-hooks/immutability */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { Canvas, useThree } from "@react-three/fiber";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, OrthographicCamera, PerspectiveCamera } from "@react-three/drei";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import MetricsPanel, { type ViewMode } from "@/components/MetricsPanel";
@@ -42,20 +42,61 @@ function DemandInvalidator({ patch, camMode }: { patch: unknown; camMode: string
   return null;
 }
 
+/** Smooth camera reset: lerps position + target each frame. */
+function CameraAnimator({ target, running, onDone }: { target: { pos: THREE.Vector3; look: THREE.Vector3 }; running: boolean; onDone: () => void }) {
+  const { camera } = useThree();
+  const elapsed = useRef(0);
+  const startPos = useRef(new THREE.Vector3());
+  const startLook = useRef(new THREE.Vector3());
+  const duration = 0.6; // seconds
+
+  useEffect(() => {
+    if (!running) return;
+    elapsed.current = 0;
+    startPos.current.copy(camera.position);
+    startLook.current.set(0, 0, 0);
+    // Try to get current target from controls
+    const oc = camera.userData.__orbitControls as OrbitControlsImpl | undefined;
+    if (oc) startLook.current.copy(oc.target);
+  }, [running, camera]);
+
+  useFrame((_, dt) => {
+    if (!running) return;
+    elapsed.current += dt;
+    const t = Math.min(1, elapsed.current / duration);
+    // Ease-out cubic
+    const e = 1 - Math.pow(1 - t, 3);
+    camera.position.lerpVectors(startPos.current, target.pos, e);
+    // Also smoothly move the orbit target
+    const oc = camera.userData.__orbitControls as OrbitControlsImpl | undefined;
+    if (oc) {
+      oc.target.lerpVectors(startLook.current, target.look, e);
+      oc.update();
+    }
+    if (t >= 1) onDone();
+  });
+
+  return null;
+}
+
 function OrthoAutoFit({ maxR }: { maxR: number }) {
   const cam = useThree((s) => s.camera as THREE.OrthographicCamera | THREE.PerspectiveCamera);
   const size = useThree((s) => s.size);
   const invalidate = useThree((s) => s.invalidate);
-  useEffect(() => {
-    if (!(cam as THREE.OrthographicCamera).isOrthographicCamera) return;
+  useLayoutEffect(() => {
     const o = cam as THREE.OrthographicCamera;
+    if (!o.isOrthographicCamera) return;
+    // Fit the full world diameter edge-to-edge to the viewport WIDTH.
+    // Subtract bottom overlay height (~70px) so the map doesn't tuck
+    // behind the timeline / mode label.
+    const bottomMargin = 70;
     const worldDiameter = 2 * maxR;
-    const viewportLarger = Math.max(size.width, size.height);
-    const viewportSmaller = Math.min(size.width, size.height);
-    const zoomFill = viewportLarger / (worldDiameter * 1.04);
-    const zoomFit = viewportSmaller / (worldDiameter * 1.08);
-    const zoom = Math.min(zoomFill, zoomFit * 1.6);
-    o.zoom = Math.max(1.2, Math.min(7, zoom));
+    const zoomW = size.width / worldDiameter;
+    const zoomH = (size.height - bottomMargin) / worldDiameter;
+    // Use whichever zoom is *larger* (shows more, so the map fits in both axes).
+    // Width-first for wide screens, height-first for tall.
+    const zoom = Math.min(zoomW, zoomH);
+    o.zoom = Math.max(0.5, zoom);
     o.updateProjectionMatrix();
     invalidate();
   }, [size.width, size.height, maxR, cam, invalidate]);
@@ -64,6 +105,7 @@ function OrthoAutoFit({ maxR }: { maxR: number }) {
 
 function hoverInfo(cell: CellInfo, gridEdges: number[], nTheta: number): {
   cls: string;
+  clsColor: string;
   zMax: number;
   zMean: number;
   occ: number;
@@ -82,6 +124,7 @@ function hoverInfo(cell: CellInfo, gridEdges: number[], nTheta: number): {
   const cellWidth = ringWidth < 0.1 ? `${(ringWidth * 100).toFixed(1)} cm` : `${ringWidth.toFixed(2)} m`;
   return {
     cls: clsCls?.label ?? "other",
+    clsColor: clsCls?.color ?? "#ffffff",
     zMax: cell.zMax,
     zMean: cell.zMean,
     occ: cell.occ,
@@ -114,24 +157,20 @@ export default function Home() {
   const [pointSize, setPointSize] = useState(2);
   const [hover, setHover] = useState<ReturnType<typeof hoverInfo> | null>(null);
   const [camMode, setCamMode] = useState<CamMode>("persp");
-  const controlsRef = useRef<OrbitControlsImpl>(null);
+  const [animTarget, setAnimTarget] = useState<{ pos: THREE.Vector3; look: THREE.Vector3 } | null>(null);
 
   const maxR = meta?.r_max ?? 100;
   const gridEdges = meta ? computeGridEdges(meta) : [];
   const nTheta = meta?.n_theta ?? 720;
 
   const resetNorth = () => {
-    const c = controlsRef.current;
-    if (!c) return;
-    if (camMode === "top") {
-      c.object.position.set(0, 180, 0.01);
-      c.target.set(0, 0, 0);
-    } else {
-      c.object.position.set(0, 130, 95);
-      c.target.set(0, 0, 0);
-    }
-    c.update();
+    const pos = camMode === "top"
+      ? new THREE.Vector3(0, 180, 0.01)
+      : new THREE.Vector3(0, 130, 95);
+    setAnimTarget({ pos, look: new THREE.Vector3(0, 0, 0) });
   };
+
+  const onAnimDone = useCallback(() => setAnimTarget(null), []);
 
   const handlePause = (p: boolean) => {
     setPaused(p);
@@ -174,7 +213,7 @@ export default function Home() {
   const showGrid = viewMode === "grid" || viewMode === "compare" || viewMode === "trav";
 
   return (
-    <div className="flex h-screen flex-col bg-zinc-950 text-zinc-100">
+    <div className="flex h-dvh flex-col overflow-hidden bg-black text-zinc-100">
       <div className="flex min-h-0 flex-1">
         <div className="relative min-w-0 flex-1">
           <Canvas
@@ -193,7 +232,7 @@ export default function Home() {
               <PerspectiveCamera key="cam-persp" makeDefault position={[0, 130, 95]} fov={45} near={0.1} far={1000} />
             )}
             {(camMode === "ortho" || camMode === "top") && <OrthoAutoFit maxR={maxR} />}
-            <color attach="background" args={["#0b0b0e"]} />
+            <color attach="background" args={["#000000"]} />
             <ambientLight intensity={0.7} />
             <directionalLight position={[60, 120, 40]} intensity={1.4} />
             <GroundPlane maxR={maxR} />
@@ -222,42 +261,72 @@ export default function Home() {
             </group>
             <OrbitControls
               key={`oc-${camMode}`}
-              ref={controlsRef}
+              ref={(r) => {
+                if (r) (r.object as THREE.Camera).userData.__orbitControls = r;
+              }}
               makeDefault
               target={[0, 0, 0]}
               minDistance={10}
-              maxDistance={320}
+              maxDistance={300}
               enablePan
               maxPolarAngle={camMode === "top" ? Math.PI / 2.001 : Math.PI / 2.05}
               minPolarAngle={camMode === "top" ? 0 : undefined}
+              minZoom={0.3}
+              maxZoom={12}
             />
             <PerfOverlay />
             <DemandInvalidator patch={patch} camMode={camMode} />
+            {animTarget && (
+              <CameraAnimator
+                target={animTarget}
+                running={!!animTarget}
+                onDone={onAnimDone}
+              />
+            )}
           </Canvas>
 
-          {/* Camera projection + north-reset */}
-          <div className="pointer-events-auto absolute right-4 top-4 flex items-center gap-1 rounded-md bg-zinc-900/80 p-1 backdrop-blur">
-            {(["persp", "ortho", "top"] as CamMode[]).map((m) => (
+          {/* ── HUD top chrome: legend (left) · camera controls (right) ───── */}
+          <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-3">
+            <div className="frost pointer-events-none px-3 py-2">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                {viewMode === "trav" ? (
+                  <>
+                    <LegendSwatch color="#22c55e" label="Drivable" />
+                    <LegendSwatch color="#f59e0b" label="Caution" />
+                    <LegendSwatch color="#ef4444" label="Blocked" />
+                  </>
+                ) : (
+                  CLASSES.map((c) => <LegendSwatch key={c.id} color={c.color} label={c.label} />)
+                )}
+              </div>
+            </div>
+
+            <div className="frost pointer-events-auto flex items-center gap-1.5 p-1">
+              {(["persp", "ortho", "top"] as CamMode[]).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setCamMode(m)}
+                  className={`rounded-[2.5px] px-2.5 py-1 text-xs font-medium transition-colors ${
+                    camMode === m ? "bg-cyan-500/20 text-white ring-1 ring-cyan-400/50" : "text-zinc-400 hover:bg-white/10 hover:text-zinc-200"
+                  }`}
+                  title={m === "persp" ? "Perspective 3D" : m === "ortho" ? "Orthographic 3D" : "Top-down 2D"}
+                >
+                  {m === "persp" ? "3D" : m === "ortho" ? "Ortho" : "Top"}
+                </button>
+              ))}
+              <div className="mx-0.5 h-4 w-px bg-white/15" />
               <button
-                key={m}
-                onClick={() => setCamMode(m)}
-                className={`rounded px-2 py-1 text-[11px] font-medium ${camMode === m ? "bg-sky-600 text-white" : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"}`}
-                title={m === "persp" ? "Perspective 3D" : m === "ortho" ? "Orthographic 3D" : "Top-down 2D"}
+                onClick={resetNorth}
+                className="rounded-[2.5px] px-2.5 py-1 text-xs font-medium text-zinc-400 transition-colors hover:bg-white/10 hover:text-zinc-200"
+                title="Reset to north-up"
               >
-                {m === "persp" ? "3D" : m === "ortho" ? "Ortho" : "Top"}
+                N↑
               </button>
-            ))}
-            <div className="mx-1 h-4 w-px bg-zinc-700" />
-            <button
-              onClick={resetNorth}
-              className="rounded px-2 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-              title="Reset to north-up"
-            >
-              N↑
-            </button>
+            </div>
           </div>
 
-          <div className="pointer-events-none absolute bottom-4 left-4 rounded-md bg-zinc-900/80 px-3 py-2 text-xs text-zinc-400 backdrop-blur">
+          {/* ── bottom-left: current mode + grid size ─────────────────── */}
+          <div className="frost pointer-events-none absolute bottom-4 left-4 px-4 py-2 text-xs text-zinc-400">
             <span className="font-semibold text-zinc-200">
               {viewMode === "grid"
                 ? "2.5D grid"
@@ -270,46 +339,18 @@ export default function Home() {
                     : "raw cloud over grid"}
             </span>
             {meta ? (
-              <span className="ml-2 font-mono">
+              <span className="hud-val ml-2">
                 {meta.n_rings} × {meta.n_theta}
               </span>
             ) : null}
             {showCloud && cloud ? (
-              <span className="ml-2 font-mono text-zinc-500">{(cloud.xyz.length / 3).toLocaleString()} pts</span>
+              <span className="hud-val ml-2 text-zinc-500">{(cloud.xyz.length / 3).toLocaleString()} pts</span>
             ) : null}
             {viewMode === "compare" && stats ? (
-              <div className="mt-1 text-[10px] text-sky-400/80">
+              <div className="hud-cap mt-1 text-cyan-400/90">
                 {stats.compression_ratio.toLocaleString()}× fewer cells than uniform 5 cm grid
               </div>
             ) : null}
-          </div>
-
-          <div className="pointer-events-none absolute left-4 top-4 rounded-md bg-zinc-900/80 px-3 py-2 text-xs backdrop-blur">
-            <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
-              {viewMode === "trav" ? (
-                <>
-                  <div className="flex items-center gap-1.5">
-                    <span className="h-2.5 w-2.5 rounded-[3px]" style={{ background: "#22c55e" }} />
-                    <span className="text-[11px] leading-none text-zinc-300">Drivable</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="h-2.5 w-2.5 rounded-[3px]" style={{ background: "#f59e0b" }} />
-                    <span className="text-[11px] leading-none text-zinc-300">Caution</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="h-2.5 w-2.5 rounded-[3px]" style={{ background: "#ef4444" }} />
-                    <span className="text-[11px] leading-none text-zinc-300">Blocked</span>
-                  </div>
-                </>
-              ) : (
-                CLASSES.map((c) => (
-                  <div key={c.id} className="flex items-center gap-1.5">
-                    <span className="h-2.5 w-2.5 rounded-[3px]" style={{ background: c.color }} />
-                    <span className="text-[11px] leading-none text-zinc-300">{c.label}</span>
-                  </div>
-                ))
-              )}
-            </div>
           </div>
 
           <Timeline
@@ -335,6 +376,15 @@ export default function Home() {
           hover={hover}
         />
       </div>
+    </div>
+  );
+}
+
+function LegendSwatch({ color, label }: { color: string; label: string }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="h-2.5 w-2.5 rounded-full" style={{ background: color }} />
+      <span className="text-xs leading-none text-zinc-300">{label}</span>
     </div>
   );
 }

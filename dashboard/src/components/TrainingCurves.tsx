@@ -66,7 +66,7 @@ function ChartTooltip({
 
 function MetricChart({ title, rows }: { title: string; rows: Record<string, number | undefined>[] }) {
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
+    <div className="frost p-4">
       <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">{title}</h3>
       <div className="h-[290px]">
         <ResponsiveContainer width="100%" height="100%">
@@ -113,7 +113,7 @@ function MetricChart({ title, rows }: { title: string; rows: Record<string, numb
 
 function PerClassChart({ rows }: { rows: Record<string, number | undefined>[] }) {
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
+    <div className="frost p-4">
       <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">
         Per-class IoU (binned 4-class)
       </h3>
@@ -214,7 +214,7 @@ export default function TrainingCurves() {
 
       <MetricChart title="Training metrics vs step" rows={metricRows} />
       <PerClassChart rows={perClassRows} />
-      <p className="text-center text-[10px] text-zinc-600">
+      <p className="hud-cap text-center">
         Hover for exact values · click legend entries to toggle series
       </p>
     </div>
@@ -223,8 +223,8 @@ export default function TrainingCurves() {
 
 function MetricCard({ label, value, sub }: { label: string; value: string; sub: string }) {
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
-      <div className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</div>
+    <div className="frost p-4">
+      <div className="hud-cap">{label}</div>
       <div className="mt-1 truncate font-mono text-sm text-zinc-100">{value}</div>
       <div className="text-xs text-zinc-500">{sub}</div>
     </div>

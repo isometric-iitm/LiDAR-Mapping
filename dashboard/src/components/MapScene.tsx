@@ -199,10 +199,11 @@ function InstancedCells({
       } else {
         cellColor = c.hex.get(cls) ?? 0xffffff;
       }
-      // Per-band donut shading: very distinct steps so >10m is not mono (no DK, pure range).
-      // 0-5m:1.00  5-10m:0.72  10-25m:0.48  25-50m:0.28  50m+:0.14 — high contrast
+      // Per-band donut shading: gentler falloff so the outer rings stay
+      // legible (10m/25m/50m previously too dark). Pure range, no DK.
+      // 0-5m:1.00  5-10m:0.90  10-25m:0.78  25-50m:0.62  50m+:0.48
       const rMid = (c.edges[i] + c.edges[i + 1]) / 2;
-      const bandIntensity = rMid < 5 ? 1.0 : rMid < 10 ? 0.72 : rMid < 25 ? 0.48 : rMid < 50 ? 0.28 : 0.14;
+      const bandIntensity = rMid < 5 ? 1.0 : rMid < 10 ? 0.9 : rMid < 25 ? 0.78 : rMid < 50 ? 0.62 : 0.48;
       t.c.setHex(cellColor);
       mesh.setColorAt(slot, t.c.multiplyScalar((0.35 + 0.65 * Math.min(1, 0.4 + occ)) * bandIntensity));
       c.geo[slot] = {
@@ -476,7 +477,7 @@ export function RangeRings({ maxR }: { maxR: number }) {
             sprite
             style={{ pointerEvents: "none" }}
           >
-            <span className="whitespace-nowrap rounded bg-zinc-900/90 px-1.5 py-0.5 text-[11px] font-medium text-zinc-400">
+            <span className="hud-val whitespace-nowrap rounded bg-black/70 px-1.5 py-0.5">
               {r}m
             </span>
           </Html>
@@ -505,7 +506,7 @@ export function GroundPlane({ maxR }: { maxR: number }) {
   return (
     <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.05, 0]}>
       <planeGeometry args={[2 * maxR, 2 * maxR]} />
-      <meshBasicMaterial color="#18181b" />
+      <meshBasicMaterial color="#000000" />
     </mesh>
   );
 }
