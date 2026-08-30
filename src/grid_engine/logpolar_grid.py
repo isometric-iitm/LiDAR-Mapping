@@ -41,6 +41,7 @@ class LogPolarGrid:
         self.occ_threshold = d["occ_threshold"]
         self.dyn_threshold = d["dyn_threshold"]
         self.dyn_change_boost = d["dyn_change_boost"]
+        self.dyn_ring_k = int(d.get("dyn_ring_k", 5))
 
         m = cfg["memory"]
         self.uniform_side = m["uniform_cell_guess"]
@@ -69,6 +70,20 @@ class LogPolarGrid:
         self.last_update = np.zeros(self.n_cells, dtype=np.int64)
         self.frame = 0
 
+        # dynamic detection ring buffer: K frames of occupancy state
+        # (replaces single-flip boost with K-frame lookback)
+        self._occ_ringbuf = np.zeros((self.dyn_ring_k, self.n_cells), dtype=bool)
+        self._ring_ptr = 0
+
+        # traversability config
+        trav_cfg = cfg.get("traversability", {})
+        self.trav_enabled = trav_cfg.get("enabled", True)
+        self.trav_weights = trav_cfg.get("weights", [0.3, 0.3, 0.3, 0.1])
+        self.trav_class_scores = trav_cfg.get("class_scores", [1.0, 0.6, 0.2, 0.1])
+        self.trav_z_diff_thresh = trav_cfg.get("z_diff_thresh", 0.12)
+        self.trav_slope_thresh = trav_cfg.get("slope_thresh", 0.15)
+        self.traversability = np.zeros(self.n_cells, dtype=np.float32)
+
         # last-sent display values (change detection for incremental deltas)
         self._sent_zmax = np.zeros(self.n_cells, dtype=np.float32)
         self._sent_cls = np.full(self.n_cells, UNKNOWN, dtype=np.uint8)
@@ -84,7 +99,6 @@ class LogPolarGrid:
         self._cls_count_f = np.zeros((self.n_cells, self.n_classes), dtype=np.int32)
         self._prev_rendered = np.zeros(self.n_cells, dtype=bool)
         self._touched = np.zeros(self.n_cells, dtype=bool)
-        self._prev_occ_state = np.zeros(self.n_cells, dtype=bool)
 
     # --- geometry ---
     def ring_index(self, r: np.ndarray) -> np.ndarray:
@@ -175,16 +189,33 @@ class LogPolarGrid:
         new_mean = zsum_c / seg_count
         self.z_mean[uniq] = self.z_mean[uniq] * 0.7 + new_mean.astype(np.float32) * 0.3
 
-        # dynamics: free -> occupied flip boosts dynamic_score
+        # dynamics: K-frame ring buffer occupancy change detection
+        # (replaces single-flip with lookback over dyn_ring_k frames)
         now_occ = self.occupancy > self.occ_threshold
-        flipped = now_occ[uniq] & ~self._prev_occ_state[uniq]
+        k = self.dyn_ring_k
+        old_occ = self._occ_ringbuf[self._ring_ptr % k]
+        flipped = now_occ[uniq] & ~old_occ[uniq]
         self.dynamic_score[uniq] += self.dyn_change_boost * flipped.astype(np.float32)
         np.clip(self.dynamic_score, 0.0, 1.0, out=self.dynamic_score)
+        self._occ_ringbuf[self._ring_ptr % k] = now_occ
+        self._ring_ptr += 1
 
         # bookkeeping
-        self._prev_occ_state = now_occ
         self.last_update[uniq] = self.frame
         self.frame += 1
+
+        # traversability: per-cell drivability score (0-1)
+        if self.trav_enabled:
+            from src.grid_engine.traversability import compute_traversability
+            self.traversability = compute_traversability(
+                self._z_min_state, self._z_max_state, self.z_mean,
+                self.dominant_class, self.occupancy,
+                self.n_rings, self.n_theta, self.ring_widths,
+                weights=self.trav_weights,
+                class_scores=self.trav_class_scores,
+                z_diff_thresh=self.trav_z_diff_thresh,
+                slope_thresh=self.trav_slope_thresh,
+            )
 
         n_hit = len(uniq)
         self._clear_scratch()
@@ -203,7 +234,7 @@ class LogPolarGrid:
         return self.occupancy > self.occ_threshold
 
     def _rows(self, idx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Client rows (k,6) float32 [i, j, z_mean, z_max, occ, dyn] + cls u8,
+        """Client rows (k,7) float32 [i, j, z_mean, z_max, occ, dyn, trav] + cls u8,
         with z stats rebased onto the ego ground so height reads "above road"."""
         i = idx // self.n_theta
         j = idx % self.n_theta
@@ -212,6 +243,7 @@ class LogPolarGrid:
             i.astype(np.float32), j.astype(np.float32),
             self.z_mean[idx] - g, self._z_max_state[idx] - g,
             self.occupancy[idx], self.dynamic_score[idx],
+            self.traversability[idx],
         ], axis=1)
         return rows, self.dominant_class[idx]
 

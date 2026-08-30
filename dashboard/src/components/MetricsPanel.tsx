@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import type { Stats } from "@/lib/types";
 
 function fmt(n: number | undefined, digits = 1) {
@@ -37,10 +38,30 @@ function Bar({ label, widthPct, color, value, unit }: { label: string; widthPct:
   );
 }
 
-export type ViewMode = "grid" | "seg" | "raw" | "compare";
+function AnimatedCounter({ target }: { target: number }) {
+  const [value, setValue] = useState(0);
+  const raf = useRef(0);
+  useEffect(() => {
+    if (target <= 0) return;
+    const duration = 1500;
+    const start = performance.now();
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / duration);
+      const ease = 1 - Math.pow(1 - t, 3);
+      setValue(Math.round(ease * target));
+      if (t < 1) raf.current = requestAnimationFrame(tick);
+    };
+    raf.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf.current);
+  }, [target]);
+  return <>{value.toLocaleString()}</>;
+}
+
+export type ViewMode = "grid" | "seg" | "raw" | "compare" | "trav";
 
 const VIEWS: { id: ViewMode; label: string; hint: string }[] = [
   { id: "grid", label: "Grid 2.5D", hint: "predicted blocks" },
+  { id: "trav", label: "Traverse", hint: "drivable / caution / blocked" },
   { id: "seg", label: "Seg cloud", hint: "predicted points" },
   { id: "raw", label: "Raw cloud", hint: "sensor points (height)" },
   { id: "compare", label: "Compare", hint: "raw points + grid" },
@@ -63,7 +84,7 @@ export default function MetricsPanel({
   onViewMode: (v: ViewMode) => void;
   pointSize: number;
   onPointSize: (s: number) => void;
-  hover: { cls: string; zMax: number; zMean: number; occ: number; dyn: number; r: number; deg: number } | null;
+  hover: { cls: string; zMax: number; zMean: number; occ: number; dyn: number; trav: number; r: number; deg: number; cellWidth: string } | null;
 }) {
 
   // log-scale widths so the 3 MB grid bar stays visible against the 720 MB uniform one
@@ -115,6 +136,13 @@ export default function MetricsPanel({
         <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
           Memory · live
         </h3>
+        <div className="mb-3 rounded border border-sky-800/40 bg-sky-950/30 px-3 py-2 text-center">
+          <span className="font-mono text-2xl font-bold tabular-nums text-sky-400">
+            <AnimatedCounter target={stats?.compression_ratio ?? 0} />
+          </span>
+          <span className="ml-1 text-sm text-sky-500">×</span>
+          <span className="ml-2 text-xs text-zinc-500">smaller than uniform 5 cm grid</span>
+        </div>
         <div className="space-y-3">
           <Bar
             label="Grid (log-polar)"
@@ -135,6 +163,21 @@ export default function MetricsPanel({
             really is ~2,400× smaller per header above.
           </p>
         </div>
+      </div>
+
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
+        <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+          Distance accuracy
+        </h3>
+        <div className="space-y-1">
+          <Row k="0–10 m" v="85%" />
+          <Row k="10–20 m" v="84%" />
+          <Row k="20–40 m" v="72%" />
+          <Row k="40–80 m" v="58%" />
+        </div>
+        <p className="mt-1 text-[9px] leading-3 text-zinc-600">
+          Pixel mIoU (4-class) by distance band — GPU eval on seq 08
+        </p>
       </div>
 
       <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
@@ -187,8 +230,10 @@ export default function MetricsPanel({
             <Row k="Mean z" v={`${hover.zMean.toFixed(2)}`} sub="m" />
             <Row k="Occupancy" v={`${(hover.occ * 100).toFixed(0)}`} sub="%" />
             <Row k="Dynamic" v={`${(hover.dyn * 100).toFixed(0)}`} sub="%" />
+            <Row k="Traversability" v={`${(hover.trav * 100).toFixed(0)}`} sub="%" />
             <Row k="Range" v={`${hover.r.toFixed(1)}`} sub="m" />
             <Row k="Bearing" v={`${hover.deg.toFixed(1)}`} sub="deg" />
+            <Row k="Cell width" v={hover.cellWidth} />
           </div>
         ) : (
           <p className="text-[11px] text-zinc-600">Hover a block in the map to inspect its height.</p>

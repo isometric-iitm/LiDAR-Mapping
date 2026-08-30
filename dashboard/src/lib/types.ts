@@ -1,4 +1,4 @@
-export type Cell = [number, number, number, number, number, number, number];
+export type Cell = [number, number, number, number, number, number, number, number];
 
 export type GridMeta = {
   type: "grid_meta";

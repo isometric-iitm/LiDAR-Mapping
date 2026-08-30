@@ -32,7 +32,7 @@ class TestBinarySnapshotHeader:
         magic, code, version = struct.unpack_from("<IHH", buf, 0)
         assert magic == 0x50433244
         assert code == 1
-        assert version == 1
+        assert version == 2
 
     def test_header_frame_and_counts(self):
         grid = LogPolarGrid(load_grid_config())
@@ -102,7 +102,7 @@ class TestBinaryDeltaHeader:
 
 
 class TestBinaryRowLayout:
-    def test_row_record_28_bytes(self):
+    def test_row_record_32_bytes(self):
         grid = LogPolarGrid(load_grid_config())
         rng = np.random.default_rng(3)
         n = 20
@@ -125,9 +125,11 @@ class TestBinaryRowLayout:
         ))
         buf = frames[0]
         body = buf[44:]
-        assert len(body) == k * 28
+        assert len(body) == k * 32
         floats = np.frombuffer(body, dtype="<f4")
-        first_row = floats[:6]
+        first_row = floats[:7]
         i_val, j_val = first_row[0], first_row[1]
+        trav_val = first_row[6]
         assert i_val >= 0
         assert j_val >= 0
+        assert 0.0 <= trav_val <= 1.0

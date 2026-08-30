@@ -17,6 +17,7 @@ export type CellInfo = {
   cls: number;
   occ: number;
   dyn: number;
+  trav: number;
   pos: [number, number, number];
 };
 
@@ -53,12 +54,14 @@ function InstancedCells({
   patch,
   onHover,
   opacity = 1,
+  travMode = false,
 }: {
   cells: CellMap;
   meta: GridMeta | null;
   patch: CellPatch | null;
   onHover?: (info: CellInfo | null) => void;
   opacity?: number;
+  travMode?: boolean;
 }) {
   const ref = useRef<THREE.InstancedMesh>(null);
   const cache = useRef<SlotCache | null>(null);
@@ -148,7 +151,7 @@ function InstancedCells({
     }
 
     const writeCell = (cell: Cell): boolean => {
-      const [i, j, zMean, zMax, cls, occ, dyn] = cell;
+      const [i, j, zMean, zMax, cls, occ, dyn, trav] = cell;
       if (!Number.isFinite(zMax) || !Number.isFinite(zMean)) return false;
       if (i < 0 || i >= meta.n_rings || j < 0 || j >= meta.n_theta) return false;
       const key = `${i}:${j}`;
@@ -184,8 +187,17 @@ function InstancedCells({
       t.s.set(b.scaleX, height, b.scaleZ);
       t.m.compose(t.p, t.q, t.s);
       mesh.setMatrixAt(slot, t.m);
-      t.c.setHex(c.hex.get(cls) ?? 0xffffff);
-      mesh.setColorAt(slot, t.c.multiplyScalar(0.25 + 0.75 * Math.min(1, 0.4 + occ)));
+      let cellColor: number;
+      if (travMode) {
+        if (trav >= 0.7) cellColor = 0x22c55e;       // green: drivable
+        else if (trav >= 0.4) cellColor = 0xf59e0b;   // amber: caution
+        else cellColor = 0xef4444;                      // red: blocked
+      } else {
+        cellColor = c.hex.get(cls) ?? 0xffffff;
+      }
+      const dynBoost = dyn > 0.5 ? 1.0 + 0.6 * Math.min(1, dyn) : 1.0;
+      t.c.setHex(cellColor);
+      mesh.setColorAt(slot, t.c.multiplyScalar((0.25 + 0.75 * Math.min(1, 0.4 + occ)) * dynBoost));
       c.geo[slot] = {
         i,
         j,
@@ -194,10 +206,13 @@ function InstancedCells({
         cls,
         occ,
         dyn,
+        trav,
         pos: [b.posX, posY, b.posZ],
         rotY: secA.th,
         scale: [b.scaleX, height, b.scaleZ],
-        color: CLASS_COLOR.get(cls) ?? "#ffffff",
+        color: travMode
+          ? (trav >= 0.7 ? "#22c55e" : trav >= 0.4 ? "#f59e0b" : "#ef4444")
+          : (CLASS_COLOR.get(cls) ?? "#ffffff"),
         alpha: Math.min(1, 0.4 + occ),
       };
       return true;
@@ -275,12 +290,14 @@ export function CellLayer({
   patch,
   onHover,
   opacity = 1,
+  travMode = false,
 }: {
   cells: CellMap;
   meta: GridMeta | null;
   patch: CellPatch | null;
   onHover?: (info: CellInfo | null) => void;
   opacity?: number;
+  travMode?: boolean;
 }) {
   return (
     <InstancedCells
@@ -289,6 +306,7 @@ export function CellLayer({
       patch={patch}
       onHover={onHover}
       opacity={opacity}
+      travMode={travMode}
     />
   );
 }
@@ -418,10 +436,15 @@ export function RangeRings({ maxR }: { maxR: number }) {
   return (
     <group>
       {rings.map((r) => (
-        <mesh key={r} rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.02, 0]}>
-          <ringGeometry args={[r - 0.06, r, 128]} />
-          <meshBasicMaterial color="#52525b" side={THREE.DoubleSide} transparent opacity={0.7} />
-        </mesh>
+        <group key={r}>
+          <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.02, 0]}>
+            <ringGeometry args={[r - 0.06, r, 128]} />
+            <meshBasicMaterial color="#52525b" side={THREE.DoubleSide} transparent opacity={0.7} />
+          </mesh>
+          <sprite position={[r + 1.5, 0.5, 0]} scale={[8, 2, 1]}>
+            <spriteMaterial color="#a1a1aa" transparent opacity={0.8} depthTest={false} />
+          </sprite>
+        </group>
       ))}
     </group>
   );

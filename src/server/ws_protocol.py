@@ -47,15 +47,15 @@ def grid_meta_message(grid) -> dict:
 #   cloud:    n_a points x {x,y,z as f32} then n_a bytes cls u8
 # ---------------------------------------------------------------------------
 _MAGIC = 0x50433244
-_VERSION = 1
+_VERSION = 2
 K_SNAPSHOT = 1
 K_DELTA = 2
 K_CLOUD = 3
 _HEAD = struct.Struct("<IHHQQiiiii")
 _HEAD_LEN = _HEAD.size          # 44
-_ROW_F32 = 6 * 4                # i,j,z_mean,z_max,occ,dyn = 24 bytes
-_ROW_PAD = 3                    # pad cls tail out to 4-byte alignment
-_ROW_TOTAL = _ROW_F32 + 1 + _ROW_PAD  # 28 bytes per grid row record
+_ROW_F32 = 7 * 4                # i,j,z_mean,z_max,occ,dyn,trav = 28 bytes
+_ROW_PAD = 3                    # pad cls tail out to 4-byte alignment (28+1+3=32)
+_ROW_TOTAL = _ROW_F32 + 1 + _ROW_PAD  # 32 bytes per grid row record
 _PAD3 = b"\x00" * _ROW_PAD
 CHUNK_CELLS = 8000
 

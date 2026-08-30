@@ -3,7 +3,7 @@
 [![Python 3.14](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org/)
 [![PyTorch 2.11](https://img.shields.io/badge/PyTorch-2.11-ee4c2c.svg)](https://pytorch.org/)
 [![Next.js 16](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org/)
-[![Tests 96 passing](https://img.shields.io/badge/tests-96%20passing-brightgreen.svg)](#testing)
+[![Tests 102 passing](https://img.shields.io/badge/tests-102%20passing-brightgreen.svg)](#testing)
 
 Real-time semantic segmentation of LiDAR point clouds projected onto a **variable-resolution log-polar 2.5D grid**, streamed over binary WebSocket to an interactive 3D dashboard. Built on SemanticKITTI, powered by a range-image UNet.
 
@@ -399,7 +399,7 @@ Large frames split at 8,000 cells / 30,000 cloud points. The epoch field lets th
 uv run pytest
 ```
 
-96 tests across 9 files, zero dependency on external data paths:
+102 tests across 10 files, zero dependency on external data paths:
 
 | Test file | Tests | Coverage |
 |-----------|-------|----------|
@@ -407,10 +407,11 @@ uv run pytest
 | `test_projection.py` | 7 | CPU/GPU parity, nearest-wins, KNN back-projection, edge cases |
 | `test_label_mapping.py` | 8 | remap_labels, bin_5_to_4, compute_class_weights |
 | `test_grid_update.py` | 5 | Occupancy decay, snapshot/delta invariants, reset |
-| `test_ws_protocol.py` | 4 | Binary header magic/codes, 28-byte row layout |
+| `test_ws_protocol.py` | 4 | Binary header magic/codes, 32-byte row layout (v2) |
 | `test_segmenter_cpu.py` | 3 | Empty scan, synthetic scan, CPU device |
 | `test_e2e_replay.py` | 5 | Replayer seek, pipeline seek-reset + epoch guard |
 | `test_evaluation.py` | 25 | Eval helpers, path resolution, synthetic pixel eval, plots, inject |
+| `test_traversability.py` | 6 | Flat drivable, steep blocked, class scores, tiers, grid integration |
 | `test_harness.py` | 21 | Fixture smoke tests, projection, grid geometry |
 
 ---

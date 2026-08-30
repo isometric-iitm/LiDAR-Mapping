@@ -87,18 +87,18 @@ function parseBinary(buf: ArrayBuffer): MapMsg | null {
   }
   if (code !== K_SNAPSHOT && code !== K_DELTA) return null;
 
-  // row record is 28 bytes: [i,j,z_mean,z_max,occ,dyn] f32 (24) + cls u8 + 3 pad
-  const f = new Float32Array(buf, 44, n * 6);
-  const cls = new Uint8Array(buf, 44 + n * 24, n);
+  // row record is 32 bytes: [i,j,z_mean,z_max,occ,dyn,trav] f32 (28) + cls u8 + 3 pad
+  const f = new Float32Array(buf, 44, n * 7);
+  const cls = new Uint8Array(buf, 44 + n * 28, n);
   const cells = new Array<Cell>(n);
   for (let k = 0; k < n; k++) {
-    const o = k * 6;
-    cells[k] = [f[o], f[o + 1], f[o + 2], f[o + 3], cls[k], f[o + 4], f[o + 5]];
+    const o = k * 7;
+    cells[k] = [f[o], f[o + 1], f[o + 2], f[o + 3], cls[k], f[o + 4], f[o + 5], f[o + 6]];
   }
   if (code === K_SNAPSHOT) {
     return { type: "snapshot", ...base, cells };
   }
-  const freedNr = new Float32Array(buf, 44 + n * 28, nFreed * 2);
+  const freedNr = new Float32Array(buf, 44 + n * 32, nFreed * 2);
   const freed = new Array<[number, number]>(nFreed);
   for (let k = 0; k < nFreed; k++) freed[k] = [freedNr[2 * k], freedNr[2 * k + 1]];
   return { type: "delta", ...base, cells, freed };

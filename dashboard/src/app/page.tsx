@@ -37,22 +37,28 @@ function hoverInfo(cell: CellInfo): {
   zMean: number;
   occ: number;
   dyn: number;
+  trav: number;
   r: number;
   deg: number;
+  cellWidth: string;
 } {
   const rIn = GRID_EDGES[cell.i];
   const rOut = GRID_EDGES[cell.i + 1] ?? GRID_EDGES[GRID_EDGES.length - 1];
   const r = (rIn + rOut) / 2;
   const deg = ((cell.j / 720) * 360 + 180) % 360;
   const clsCls = CLASSES.find((c) => c.id === cell.cls);
+  const ringWidth = rOut - rIn;
+  const cellWidth = ringWidth < 0.1 ? `${(ringWidth * 100).toFixed(1)} cm` : `${ringWidth.toFixed(2)} m`;
   return {
     cls: clsCls?.label ?? "other",
     zMax: cell.zMax,
     zMean: cell.zMean,
     occ: cell.occ,
     dyn: cell.dyn,
+    trav: cell.trav,
     r,
     deg,
+    cellWidth,
   };
 }
 
@@ -100,6 +106,7 @@ export default function Home() {
 
   const showCloud = viewMode === "seg" || viewMode === "raw" || viewMode === "compare";
   const gridOpacity = viewMode === "compare" ? 0.35 : 1;
+  const showGrid = viewMode === "grid" || viewMode === "compare" || viewMode === "trav";
 
   return (
     <div className="flex h-screen flex-col bg-zinc-950 text-zinc-100">
@@ -119,13 +126,14 @@ export default function Home() {
                 frame every tick, so a fixed +90deg puts the ego's forward
                 (+X scene axis) at the top of the screen permanently. */}
             <group rotation={[0, Math.PI / 2, 0]}>
-              {(viewMode === "grid" || viewMode === "compare") && (
+              {showGrid && (
                 <CellLayer
                   cells={cells}
                   meta={meta}
                   patch={patch}
-                  onHover={viewMode === "grid" ? (i) => setHover(i ? hoverInfo(i) : null) : undefined}
+                  onHover={viewMode === "grid" || viewMode === "trav" ? (i) => setHover(i ? hoverInfo(i) : null) : undefined}
                   opacity={gridOpacity}
+                  travMode={viewMode === "trav"}
                 />
               )}
               {showCloud &&
@@ -150,7 +158,9 @@ export default function Home() {
             <span className="font-semibold text-zinc-200">
               {viewMode === "grid"
                 ? "2.5D grid"
-                : viewMode === "seg"
+                : viewMode === "trav"
+                  ? "traversability"
+                  : viewMode === "seg"
                   ? "segmented cloud"
                   : viewMode === "raw"
                     ? "raw point cloud"
@@ -164,16 +174,38 @@ export default function Home() {
             {showCloud && cloud ? (
               <span className="ml-2 font-mono text-zinc-500">{(cloud.xyz.length / 3).toLocaleString()} pts</span>
             ) : null}
+            {viewMode === "compare" && stats ? (
+              <div className="mt-1 text-[10px] text-sky-400/80">
+                {stats.compression_ratio.toLocaleString()}× fewer cells than uniform 5 cm grid
+              </div>
+            ) : null}
           </div>
 
           <div className="pointer-events-none absolute left-4 top-4 rounded-md bg-zinc-900/80 px-3 py-2 text-xs backdrop-blur">
             <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
-              {CLASSES.map((c) => (
-                <div key={c.id} className="flex items-center gap-1.5">
-                  <span className="h-2.5 w-2.5 rounded-[3px]" style={{ background: c.color }} />
-                  <span className="text-[11px] leading-none text-zinc-300">{c.label}</span>
-                </div>
-              ))}
+              {viewMode === "trav" ? (
+                <>
+                  <div className="flex items-center gap-1.5">
+                    <span className="h-2.5 w-2.5 rounded-[3px]" style={{ background: "#22c55e" }} />
+                    <span className="text-[11px] leading-none text-zinc-300">Drivable</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="h-2.5 w-2.5 rounded-[3px]" style={{ background: "#f59e0b" }} />
+                    <span className="text-[11px] leading-none text-zinc-300">Caution</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="h-2.5 w-2.5 rounded-[3px]" style={{ background: "#ef4444" }} />
+                    <span className="text-[11px] leading-none text-zinc-300">Blocked</span>
+                  </div>
+                </>
+              ) : (
+                CLASSES.map((c) => (
+                  <div key={c.id} className="flex items-center gap-1.5">
+                    <span className="h-2.5 w-2.5 rounded-[3px]" style={{ background: c.color }} />
+                    <span className="text-[11px] leading-none text-zinc-300">{c.label}</span>
+                  </div>
+                ))
+              )}
             </div>
           </div>
 

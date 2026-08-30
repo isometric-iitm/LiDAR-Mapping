@@ -16,6 +16,14 @@ decay:
   occ_threshold: 0.2  # rendered/occupied threshold
   dyn_threshold: 0.5  # dynamic_score above this marks a cell DYNAMIC
   dyn_change_boost: 0.2  # dynamic_score boost when cell occupancy state flips free->occupied
+  dyn_ring_k: 5            # ring buffer depth for occupancy lookback (5 frames = 0.5s @ 10Hz)
+
+traversability:
+  enabled: true
+  weights: [0.3, 0.3, 0.3, 0.1]   # [z_score, slope_score, class_score, occ_score]
+  z_diff_thresh: 0.12              # height variation threshold (m) — above this = steep
+  slope_thresh: 0.15              # neighbor slope threshold — above this = steep
+  class_scores: [1.0, 0.6, 0.2, 0.1]  # per-class: drivable=1.0, terrain=0.6, static=0.2, dynamic=0.1
 
 memory:
   uniform_cell_guess: 200.0  # uniform 5cm grid square side (m) used for equivalent count (spec says 200 m)
