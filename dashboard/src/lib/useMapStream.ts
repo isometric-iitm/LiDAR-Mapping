@@ -132,11 +132,20 @@ export function useMapStream(): UseMapStream {
   useEffect(() => {
     let cancelled = false;
     let retry: ReturnType<typeof setTimeout> | null = null;
+    let attempts = 0;
 
     const connect = () => {
       if (cancelled) return;
       setConn("connecting");
-      const ws = new WebSocket(WS_URL);
+      let ws: WebSocket;
+      try {
+        ws = new WebSocket(WS_URL);
+      } catch {
+        const backoff = Math.min(500 * 2 ** attempts, 5000);
+        attempts += 1;
+        retry = setTimeout(connect, backoff);
+        return;
+      }
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
       sendRef.current = (msg: object) => {
@@ -144,6 +153,7 @@ export function useMapStream(): UseMapStream {
       };
 
       ws.onopen = () => {
+        attempts = 0;
         if (!cancelled) setConn("open");
       };
 
@@ -285,10 +295,16 @@ export function useMapStream(): UseMapStream {
       ws.onclose = () => {
         if (cancelled) return;
         setConn("closed");
-        retry = setTimeout(connect, 2000);
+        const backoff = Math.min(500 * 2 ** attempts, 5000);
+        attempts += 1;
+        console.warn(`[ws] closed, reconnect in ${backoff}ms (attempt ${attempts})`);
+        retry = setTimeout(connect, backoff);
       };
 
-      ws.onerror = () => ws.close();
+      ws.onerror = () => {
+        // onerror is followed by onclose; just ensure close fires
+        try { ws.close(); } catch {}
+      };
     };
 
     connect();

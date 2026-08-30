@@ -20,10 +20,14 @@ class TestOccupancyDecay:
         for _ in range(n_decay):
             grid.update(other_pts, sample_labels)
 
-        expected_decay = math.exp(-(1.0 / grid.frame_hz) / grid.tau_free) ** n_decay
         occ_after = grid.occupancy[hit_cell[0]]
         assert occ_after < occ_before
-        assert occ_after == pytest.approx(occ_before * expected_decay, rel=0.05)
+        if grid.decay_enabled:
+            expected_decay = math.exp(-(1.0 / grid.frame_hz) / grid.tau_free) ** n_decay
+            assert occ_after == pytest.approx(occ_before * expected_decay, rel=0.05)
+        else:
+            # precise mode: instant free when not re-hit
+            assert occ_after == pytest.approx(0.0, abs=1e-6)
 
     def test_occupancy_increases_on_hit(self, grid, sample_points, sample_labels):
         grid.occupancy[:] = 0.0

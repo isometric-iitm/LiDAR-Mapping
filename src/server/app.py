@@ -43,7 +43,9 @@ class Pipeline:
         )
         self.grid = LogPolarGrid()
         self.grid_lock = threading.Lock()
-        self.messages: queue.Queue = queue.Queue(maxsize=8)
+        # Larger queue; precise mode drops intermediate snapshots (coalesce) so
+        # 10Hz snapshots don't overflow when dashboard is briefly slow.
+        self.messages: queue.Queue = queue.Queue(maxsize=32)
         self.pause_event = threading.Event()
         self._frames_emitted = 0
         self._frames_dropped = 0
@@ -59,6 +61,8 @@ class Pipeline:
         self._project_window = []
         self._forward_window = []
         self._mem = None
+        self._perf_n = 0
+        self._perf_sum = {"seg": 0.0, "grid": 0.0, "pack": 0.0, "proc": 0.0}
         self.cloud_on = False
         self.cloud_max = int(self.cfg["server"].get("cloud_points_max", 30000))
         self._snap_iv = int(self.cfg["server"].get("snapshot_interval_frames", 20))
@@ -134,16 +138,39 @@ class Pipeline:
     def _emit(self, payload, kind: str = "text"):
         """Queue a broadcast payload. kind='text' -> JSON dict, 'binary' -> bytes frame."""
         item = ("T", payload) if kind == "text" else ("B", payload)
+        # In precise mode every frame is a full snapshot (large). Instead of
+        # dropping just the oldest entry and still overflowing next put, coalesce:
+        # keep only the latest binary frame so we never lag (text stats/ack preserved).
+        is_binary = (kind != "text")
         try:
             self.messages.put_nowait(item)
             self._frames_emitted += 1
         except queue.Full:
-            self._drop_oldest()
-            self._frames_dropped += 1
+            if is_binary:
+                # Drain all queued binary frames, keep only text (stats/ack) if any
+                kept: list = []
+                while True:
+                    try:
+                        q = self.messages.get_nowait()
+                        if q[0] == "T":
+                            kept.append(q)
+                        else:
+                            self._frames_dropped += 1
+                    except queue.Empty:
+                        break
+                for k in kept:
+                    try:
+                        self.messages.put_nowait(k)
+                    except queue.Full:
+                        break
+            else:
+                self._drop_oldest()
+                self._frames_dropped += 1
             try:
                 self.messages.put_nowait(item)
                 self._frames_emitted += 1
             except queue.Full:
+                self._frames_dropped += 1
                 pass
 
     def _loop(self):
@@ -181,7 +208,13 @@ class Pipeline:
         stats_msg = None
         with self.grid_lock:
             self.grid.update(frame.points, cls4)
-            if self.grid.frame - self._last_snapshot_frame >= snap_iv:
+            # precise (no-decay) mode: every frame is a full snapshot so client never holds stale cells
+            # until the next incremental snapshot — eliminates the "older stays until new comes" ghost.
+            if not self.grid.decay_enabled:
+                snap = self.grid.snapshot()
+                is_snap = True
+                self._last_snapshot_frame = self.grid.frame
+            elif self.grid.frame - self._last_snapshot_frame >= snap_iv:
                 snap = self.grid.snapshot()
                 is_snap = True
                 self._last_snapshot_frame = self.grid.frame
@@ -189,8 +222,8 @@ class Pipeline:
                 snap = self.grid.delta()
                 is_snap = False
             if self.grid.frame - self._last_stats_frame >= stats_iv:
-                if self._mem is None:
-                    self._mem = self.grid.memory_report()
+                # Recompute every interval so rendered KB / compression reflect live scene (was cached static)
+                self._mem = self.grid.memory_report()
                 stats = self._compute_stats(self._mem)
                 self._last_stats_frame = self.grid.frame
                 stats_msg = ws_protocol.stats_message(stats)
@@ -235,7 +268,32 @@ class Pipeline:
             if len(buf) > 100:
                 buf.pop(0)
 
-        if proc_ms > 400.0:
+        # detailed perf log every 30 frames (and on any slow frame)
+        self._perf_n += 1
+        self._perf_sum["seg"] += timings.get('total', 0.0)
+        self._perf_sum["grid"] += grid_ms
+        self._perf_sum["pack"] += pack_ms
+        self._perf_sum["proc"] += proc_ms
+        if self._perf_n >= 30 or proc_ms > 400.0:
+            n = self._perf_n
+            avg = {k: v / n for k, v in self._perf_sum.items()}
+            qd = self.messages.qsize()
+            try:
+                sr = snap["rows"]
+                tot = int(sr.shape[0])
+                if tot:
+                    js = sr[:, 1]  # sector j
+                    behind = int(np.count_nonzero((js < 90) | (js > 630)))
+                    front = tot - behind
+                else:
+                    behind = front = 0
+                    tot = 0
+            except:
+                tot = behind = front = -1
+            print(f"[perf] avg{n} seg={avg['seg']:.1f}ms grid={avg['grid']:.1f}ms pack={avg['pack']:.1f}ms proc={avg['proc']:.1f}ms q={qd} drop={self._frames_dropped} rendered={tot} front={front} behind={behind}")
+            self._perf_n = 0
+            self._perf_sum = {"seg": 0.0, "grid": 0.0, "pack": 0.0, "proc": 0.0}
+        elif proc_ms > 400.0:
             print(f"[slow] frame {self.grid.frame}: seg={timings.get('total', 0.0):.0f}ms "
                   f"grid={grid_ms:.1f}ms pack={pack_ms:.1f}ms cloud={cloud_ms:.1f}ms "
                   f"n_cells={self._mem['n_cells'] if self._mem else 0}")
@@ -312,9 +370,11 @@ class Pipeline:
             "cloud_ms": stages["cloud"],
             "project_ms": round(float(np.mean(self._project_window)), 1) if self._project_window else 0.0,
             "forward_ms": round(float(np.mean(self._forward_window)), 1) if self._forward_window else 0.0,
-            "grid_mem_kb": mem["grid_kb"],
+            "grid_mem_kb": mem.get("rendered_kb", mem["grid_kb"]),
             "uniform_equiv_mb": mem["uniform_mb"],
             "compression_ratio": mem["compression_ratio"],
+            "capacity_compression": mem.get("capacity_compression", mem["compression_ratio"]),
+            "rendered_cells": mem.get("rendered_cells", 0),
             "n_cells": mem["n_cells"],
             "seq_pos": self.replayer.i,
             "seq_len": len(self.replayer),

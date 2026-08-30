@@ -17,7 +17,7 @@ export const metadata: Metadata = {
   description: "Live 2.5D log-polar grid mapping from SemanticKITTI seq 08 via a range-image UNet.",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html
       lang="en"

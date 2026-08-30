@@ -12,9 +12,10 @@ import {
   CellLayer,
   CloudComparisonView,
   CloudSegView,
+  GroundPlane,
+  PerfOverlay,
   RangeRings,
   EgoMarker,
-  GroundPlane,
   type CellInfo,
 } from "@/components/MapScene";
 import { useMapStream } from "@/lib/useMapStream";
@@ -172,21 +173,19 @@ export default function Home() {
       <div className="flex min-h-0 flex-1">
         <div className="relative min-w-0 flex-1">
           <Canvas
-            frameloop="demand"
+            frameloop="always"
             dpr={[1, 2]}
             onCreated={({ gl }) => {
-              // demand mode still needs to wake on data changes — the
-              // invalidate call is triggered by patch/cellCount effects below.
               gl.toneMappingExposure = 1;
             }}
           >
             {/* Camera rig: perspective (angled 3D), ortho (angled 3D), top (2D). */}
             {camMode === "ortho" ? (
-              <OrthographicCamera key="ortho" makeDefault position={[0, 130, 95]} zoom={2.5} near={0.1} far={1000} />
+              <OrthographicCamera key="cam-ortho" makeDefault position={[0, 130, 95]} zoom={2.5} near={0.1} far={1000} />
             ) : camMode === "top" ? (
-              <OrthographicCamera key="top" makeDefault position={[0, 180, 0.01]} zoom={2.5} near={0.1} far={1000} />
+              <OrthographicCamera key="cam-top" makeDefault position={[0, 180, 0.01]} zoom={2.5} near={0.1} far={1000} />
             ) : (
-              <PerspectiveCamera key="persp" makeDefault position={[0, 130, 95]} fov={45} near={0.1} far={1000} />
+              <PerspectiveCamera key="cam-persp" makeDefault position={[0, 130, 95]} fov={45} near={0.1} far={1000} />
             )}
             {(camMode === "ortho" || camMode === "top") && <OrthoAutoFit maxR={maxR} />}
             <color attach="background" args={["#0b0b0e"]} />
@@ -217,7 +216,7 @@ export default function Home() {
               <EgoMarker />
             </group>
             <OrbitControls
-              key={camMode}
+              key={`oc-${camMode}`}
               ref={controlsRef}
               makeDefault
               target={[0, 0, 0]}
@@ -227,6 +226,7 @@ export default function Home() {
               maxPolarAngle={camMode === "top" ? Math.PI / 2.001 : Math.PI / 2.05}
               minPolarAngle={camMode === "top" ? 0 : undefined}
             />
+            <PerfOverlay />
             <DemandInvalidator patch={patch} camMode={camMode} />
           </Canvas>
 

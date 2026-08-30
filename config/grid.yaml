@@ -10,13 +10,11 @@ grid:
   n_classes: 4        # canonical classes displayed in the dashboard
 
 decay:
-  tau_free: 1.5       # seconds for occupancy/dynamic decay constant (occupancy -> exp(-dt/tau))
+  enabled: false      # AP0 precise sensor mode: no temporal decay, grid shows live scan only (if true, uses tau_free)
+  tau_free: 1.5       # seconds for occupancy decay when enabled (occupancy -> exp(-dt/tau)); ignored when enabled=false
   frame_hz: 10.0
-  occupancy_gain: 0.3 # per-frame increase for freshly hit cells: occ += (1-occ)*gain
+  occupancy_gain: 1.0 # per-frame occupancy for hit cells when precise (1.0 = fully occupied this frame)
   occ_threshold: 0.2  # rendered/occupied threshold
-  dyn_threshold: 0.5  # dynamic_score above this marks a cell DYNAMIC
-  dyn_change_boost: 0.2  # dynamic_score boost when cell occupancy state flips free->occupied
-  dyn_ring_k: 5            # ring buffer depth for occupancy lookback (5 frames = 0.5s @ 10Hz)
 
 traversability:
   enabled: true

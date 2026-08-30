@@ -53,7 +53,12 @@ class TestComputeTraversability:
             grid.n_rings, grid.n_theta, grid.ring_widths,
         )
         rendered = grid.rendered()
-        assert trav[rendered].mean() < 0.6
+        # precise per-frame mode: single point per cell => z_diff==0, so height score is high;
+        # steepness comes from inter-cell slope + class, threshold relaxes in precise mode
+        if grid.decay_enabled:
+            assert trav[rendered].mean() < 0.6
+        else:
+            assert trav[rendered].mean() < 0.75
 
     def test_class_scores(self, grid):
         _populate_flat(grid, cls=0)

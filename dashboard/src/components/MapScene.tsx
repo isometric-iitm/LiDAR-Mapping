@@ -1,5 +1,6 @@
 "use client";
 
+import { useFrame, useThree } from "@react-three/fiber";
 import { useLayoutEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import { CLASS_COLOR } from "@/lib/colors";
@@ -111,7 +112,7 @@ function InstancedCells({
 
     const clearAll = () => {
       for (const slot of c.slotOf.values()) {
-        t.p.set(0, 0, 0);
+        t.p.set(0, -1000, 0);
         t.s.set(0, 0, 0);
         t.q.identity();
         t.m.compose(t.p, t.q, t.s);
@@ -157,7 +158,9 @@ function InstancedCells({
       const key = `${i}:${j}`;
       const prevSlot = c.slotOf.get(key);
       const prev = prevSlot !== undefined ? c.geo[prevSlot] : null;
-      if (prev && prev.zMax === zMax && prev.zMean === zMean && prev.occ === occ && prev.cls === cls && prev.trav === trav && prev.dyn === dyn) {
+      // Dirty-skip on sensor truth only (no trav/dyn cache) — keeps per-frame
+      // accuracy (instant free every scan) but avoids re-pushing unchanged cells.
+      if (prev && prev.zMax === zMax && prev.zMean === zMean && prev.occ === occ && prev.cls === cls) {
         return false;
       }
       let b = c.base.get(key);
@@ -195,9 +198,12 @@ function InstancedCells({
       } else {
         cellColor = c.hex.get(cls) ?? 0xffffff;
       }
-      const dynBoost = dyn > 0.5 ? 1.0 + 0.6 * Math.min(1, dyn) : 1.0;
+      // Per-band donut shading: very distinct steps so >10m is not mono (no DK, pure range).
+      // 0-5m:1.00  5-10m:0.72  10-25m:0.48  25-50m:0.28  50m+:0.14 — high contrast
+      const rMid = (c.edges[i] + c.edges[i + 1]) / 2;
+      const bandIntensity = rMid < 5 ? 1.0 : rMid < 10 ? 0.72 : rMid < 25 ? 0.48 : rMid < 50 ? 0.28 : 0.14;
       t.c.setHex(cellColor);
-      mesh.setColorAt(slot, t.c.multiplyScalar((0.25 + 0.75 * Math.min(1, 0.4 + occ)) * dynBoost));
+      mesh.setColorAt(slot, t.c.multiplyScalar((0.35 + 0.65 * Math.min(1, 0.4 + occ)) * bandIntensity));
       c.geo[slot] = {
         i,
         j,
@@ -222,7 +228,10 @@ function InstancedCells({
       const key = `${i}:${j}`;
       const slot = c.slotOf.get(key);
       if (slot === undefined) return false;
-      t.p.set(0, 0, 0);
+      // Park freed instances far below ground with zero scale so they don't
+      // cluster at the ego origin as degenerate flickering lines/dots (precise
+      // mode frees ~1k slots per frame).
+      t.p.set(0, -1000, 0);
       t.s.set(0, 0, 0);
       t.q.identity();
       t.m.compose(t.p, t.q, t.s);
@@ -498,6 +507,41 @@ export function GroundPlane({ maxR }: { maxR: number }) {
       <meshBasicMaterial color="#18181b" />
     </mesh>
   );
+}
+
+export function PerfOverlay({ onStats }: { onStats?: (s: { fps: number; js: number; draws: number; tris: number }) => void }) {
+  const gl = useThree((s) => s.gl);
+  const last = useRef(performance.now());
+  const acc = useRef({ n: 0, sumFps: 0, sumJs: 0 });
+  const t0 = useRef(0);
+  useLayoutEffect(() => {
+    const orig = gl.render.bind(gl);
+    // wrap render to time JS (buffer upload + draw)
+    gl.render = ((scene: THREE.Scene, camera: THREE.Camera) => {
+      t0.current = performance.now();
+      orig(scene, camera);
+      const dt = performance.now() - t0.current;
+      acc.current.sumJs += dt;
+    }) as typeof gl.render;
+    return () => { gl.render = orig; };
+  }, [gl]);
+  useFrame(() => {
+    const now = performance.now();
+    const dt = now - last.current;
+    last.current = now;
+    acc.current.n += 1;
+    acc.current.sumFps += 1000 / Math.max(dt, 0.1);
+    if (acc.current.n >= 30) {
+      const info = gl.info.render;
+      const avgFps = acc.current.sumFps / acc.current.n;
+      const avgJs = acc.current.sumJs / acc.current.n;
+      onStats?.({ fps: avgFps, js: avgJs, draws: info.calls, tris: info.triangles });
+      // also console for backend correlation
+      console.log(`[perf] fps=${avgFps.toFixed(1)} js=${avgJs.toFixed(2)}ms draws=${info.calls} tris=${(info.triangles/1000).toFixed(1)}k`);
+      acc.current = { n: 0, sumFps: 0, sumJs: 0 };
+    }
+  });
+  return null;
 }
 
 export { THREE };
