@@ -126,9 +126,7 @@ export function useMapStream(): UseMapStream {
   const cloudOnRef = useRef(false);
   const lastHeading = useRef(-1);
   const cloudBuf = useRef<{ xyz: Float32Array; cls: Uint8Array; off: number } | null>(null);
-  const lastCommitTs = useRef(0);
-  const decodeMsRef = useRef(0);
-  const frameLog = useRef<{ frame: number; ts: number; n: number }[]>([]);
+
   const deltaAcc = useRef<Cell[]>([]);
 
   useEffect(() => {
@@ -147,40 +145,6 @@ export function useMapStream(): UseMapStream {
 
       ws.onopen = () => {
         if (!cancelled) setConn("open");
-      };
-
-      // per-frame render telemetry: printed on every committed message so the
-      // inter-frame cadence / decode cost for choppiness tuning is visible
-      const logCommit = (frame: number, n: number) => {
-        const now = performance.now();
-        const since = lastCommitTs.current ? now - lastCommitTs.current : 0;
-        lastCommitTs.current = now;
-        if (typeof window !== "undefined") {
-          const w = window as unknown as { __pc2d?: { commits: number } };
-          if (!w.__pc2d) w.__pc2d = { commits: 0 };
-          w.__pc2d.commits++;
-        }
-        console.log(
-          `[map] frame=${frame} renderedAt=${new Date().toISOString()} ` +
-            `sincePrev=${since.toFixed(1)}ms decode=${decodeMsRef.current.toFixed(2)}ms n=${n}`
-        );
-        frameLog.current.push({ frame, ts: now, n });
-        if (frameLog.current.length >= 120) {
-          const xs = frameLog.current;
-          const dts: number[] = [];
-          for (let k = 1; k < xs.length; k++) dts.push(xs[k].ts - xs[k - 1].ts);
-          dts.sort((a, b) => a - b);
-          const avg = dts.reduce((a, b) => a + b, 0) / dts.length;
-          const p95 = dts[Math.floor(dts.length * 0.95)] ?? dts[0];
-          console.groupCollapsed(`[map] perf summary (last ${xs.length} commits)`);
-          console.log(
-            `cadence avg=${avg.toFixed(1)}ms p95=${p95.toFixed(1)}ms max=${dts[dts.length - 1].toFixed(1)}ms ` +
-              `decode avg=${(decodeMsRef.current).toFixed(2)}ms`
-          );
-          console.log(`est. fps=${(1000 / Math.max(avg, 1e-3)).toFixed(1)}`);
-          console.groupEnd();
-          frameLog.current = [];
-        }
       };
 
       const handleMsg = (msg: MapMsg) => {
@@ -264,7 +228,6 @@ export function useMapStream(): UseMapStream {
           if (msg.seq === msg.total - 1 && cb) {
             setCloud({ frame: msg.frame, xyz: cb.xyz.slice(0, cb.off * 3), cls: cb.cls.slice(0, cb.off) });
             cloudBuf.current = null;
-            logCommit(msg.frame, cb.off);
           }
           return;
         }
@@ -284,7 +247,6 @@ export function useMapStream(): UseMapStream {
             setLastFrame(msg.frame);
             setPatch({ kind: "delta", frame: msg.frame, upserts: deltaAcc.current, frees: msg.freed });
             deltaAcc.current = [];
-            logCommit(msg.frame, full.current.size);
           }
           return;
         }
@@ -302,7 +264,6 @@ export function useMapStream(): UseMapStream {
             setCells(new Map(full.current));
             setLastFrame(msg.frame);
             setPatch({ kind: "snap", frame: msg.frame, upserts: [...snapBuf.current.values()] });
-            logCommit(msg.frame, full.current.size);
           }
         }
       };
@@ -316,9 +277,7 @@ export function useMapStream(): UseMapStream {
             /* ignore malformed */
           }
         } else {
-          const t0 = performance.now();
           const msg = parseBinary(ev.data as ArrayBuffer);
-          decodeMsRef.current = performance.now() - t0;
           if (msg) handleMsg(msg);
         }
       };

@@ -2,8 +2,8 @@
 
 import { useLayoutEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
-import { useFrame, useThree } from "@react-three/fiber";
 import { CLASS_COLOR } from "@/lib/colors";
+import { Html } from "@react-three/drei";
 import type { Cell, GridMeta } from "@/lib/types";
 import type { CellMap, CellPatch } from "@/lib/useMapStream";
 
@@ -157,7 +157,7 @@ function InstancedCells({
       const key = `${i}:${j}`;
       const prevSlot = c.slotOf.get(key);
       const prev = prevSlot !== undefined ? c.geo[prevSlot] : null;
-      if (prev && prev.zMax === zMax && prev.zMean === zMean && prev.occ === occ && prev.cls === cls) {
+      if (prev && prev.zMax === zMax && prev.zMean === zMean && prev.occ === occ && prev.cls === cls && prev.trav === trav && prev.dyn === dyn) {
         return false;
       }
       let b = c.base.get(key);
@@ -259,18 +259,37 @@ function InstancedCells({
       mesh.instanceMatrix.needsUpdate = true;
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
-  }, [cells, meta, patch, opacity]);
+  }, [cells, meta, patch, opacity, travMode]);
+
+  // Ensure the bounding sphere covers the full scene so raycasting finds
+  // instances even when most slots are at the origin (freed / not yet written).
+  useLayoutEffect(() => {
+    const mesh = ref.current;
+    if (!mesh) return;
+    mesh.geometry.computeBoundingSphere();
+    const sphere = mesh.geometry.boundingSphere;
+    if (sphere) {
+      sphere.radius = 200;
+      sphere.center.set(0, 0, 0);
+    }
+  }, [meta]);
 
   return (
     <instancedMesh
       ref={ref}
       args={[undefined, undefined, MAX_INSTANCES]}
       frustumCulled={false}
-      onPointerMove={(e) =>
-        onHover?.(
-          e.instanceId != null && cache.current && cache.current.geo[e.instanceId] ? cache.current.geo[e.instanceId] : null
-        )
-      }
+      onPointerMove={(e) => {
+        if (!onHover) return;
+        // R3F event.instanceId is the slot index; fall back to raycast order.
+        const id = (e as unknown as { instanceId?: number }).instanceId;
+        if (id != null && cache.current?.geo[id]) {
+          onHover(cache.current.geo[id]);
+        } else {
+          onHover(null);
+        }
+        e.stopPropagation();
+      }}
       onPointerOut={() => onHover?.(null)}
     >
       <boxGeometry />
@@ -441,9 +460,16 @@ export function RangeRings({ maxR }: { maxR: number }) {
             <ringGeometry args={[r - 0.06, r, 128]} />
             <meshBasicMaterial color="#52525b" side={THREE.DoubleSide} transparent opacity={0.7} />
           </mesh>
-          <sprite position={[r + 1.5, 0.5, 0]} scale={[8, 2, 1]}>
-            <spriteMaterial color="#a1a1aa" transparent opacity={0.8} depthTest={false} />
-          </sprite>
+          <Html
+            position={[r + 1.5, 0.3, 0]}
+            center
+            sprite
+            style={{ pointerEvents: "none" }}
+          >
+            <span className="whitespace-nowrap rounded bg-zinc-900/90 px-1.5 py-0.5 text-[11px] font-medium text-zinc-400">
+              {r}m
+            </span>
+          </Html>
         </group>
       ))}
     </group>
@@ -472,144 +498,6 @@ export function GroundPlane({ maxR }: { maxR: number }) {
       <meshBasicMaterial color="#18181b" />
     </mesh>
   );
-}
-
-const PERF_LOG_EVERY = 30;
-
-type TimerQueryExt = {
-  TIME_ELAPSED_EXT: number;
-  QUERY_RESULT_AVAILABLE_EXT: number;
-  QUERY_RESULT_EXT: number;
-  createQueryEXT: () => unknown;
-  beginQueryEXT: (target: number, q: unknown) => void;
-  endQueryEXT: (q: unknown) => void;
-  getQueryObjectEXT: (q: unknown, pname: number) => unknown;
-  deleteQueryEXT: (q: unknown) => void;
-};
-
-// In-canvas render telemetry. Logs an aggregate line every n frames with the
-// JS render cost (measured around gl.render, includes buffer uploads + draws),
-// GPU time via EXT_disjoint_timer_query_webgl2 when available, draw-call /
-// triangle counts, and how many stream patches were committed in that window.
-// Joins the [map] cadence log from useMapStream to separate server / wire /
-// JS / GPU stages of the pipeline.
-export function FramePerf() {
-  const gl = useThree((s) => s.gl);
-  const last = useRef(0);
-  const a = useRef({ n: 0, fps: 0, js: 0, gpu: 0, gpuN: 0, patches: 0 });
-  const renderMs = useRef(0);
-  const extRef = useRef<TimerQueryExt | null>(null);
-  const queryRef = useRef<unknown | null>(null);
-
-  useLayoutEffect(() => {
-    if (!gl || extRef.current) return;
-    // enable GPU timing only when every method the extension needs is present;
-    // otherwise keep timing off and always render through the original method
-    let ext: TimerQueryExt | null = null;
-    try {
-      const ctx = gl.getContext() as unknown as { getExtension: (name: string) => unknown };
-      const raw = (ctx.getExtension("EXT_disjoint_timer_query_webgl2") ?? null) as Partial<TimerQueryExt> | null;
-      if (
-        raw &&
-        typeof raw.createQueryEXT === "function" &&
-        typeof raw.beginQueryEXT === "function" &&
-        typeof raw.endQueryEXT === "function" &&
-        typeof raw.getQueryObjectEXT === "function" &&
-        typeof raw.deleteQueryEXT === "function"
-      ) {
-        ext = raw as TimerQueryExt;
-      } else {
-        console.warn("[render] GPU timer query extension unavailable; gpu= will be '-'");
-      }
-    } catch {
-      ext = null;
-      console.warn("[render] GPU timer query unavailable; gpu= will be '-'");
-    }
-    extRef.current = ext;
-    const orig = gl.render.bind(gl);
-    gl.render = (scene, camera) => {
-      const t0 = performance.now();
-      const ext_ = extRef.current;
-      if (ext_ && !queryRef.current) {
-        try {
-          const q = ext_.createQueryEXT();
-          queryRef.current = q;
-          ext_.beginQueryEXT(ext_.TIME_ELAPSED_EXT, q);
-          orig(scene, camera);
-          ext_.endQueryEXT(q);
-        } catch {
-          try {
-            if (queryRef.current) ext_.endQueryEXT(queryRef.current);
-          } catch {
-            /* context lost; skip GPU timing */
-          }
-          queryRef.current = null;
-        }
-      } else {
-        orig(scene, camera);
-      }
-      renderMs.current = performance.now() - t0;
-    };
-  }, [gl]);
-
-  useFrame(() => {
-    const now = performance.now();
-    if (!last.current) {
-      last.current = now;
-      return;
-    }
-    const dt = now - last.current;
-    last.current = now;
-    const ext = extRef.current;
-    const q = queryRef.current;
-    if (ext && q) {
-      try {
-        if (ext.getQueryObjectEXT(q, ext.QUERY_RESULT_AVAILABLE_EXT)) {
-          const t = ext.getQueryObjectEXT(q, ext.QUERY_RESULT_EXT) as number;
-          ext.deleteQueryEXT(q);
-          queryRef.current = null;
-          a.current.gpu += t / 1e6;
-          a.current.gpuN++;
-        }
-      } catch {
-        try {
-          ext.deleteQueryEXT(q);
-        } catch {
-          /* ignore */
-        }
-        queryRef.current = null;
-      }
-    }
-    a.current.n++;
-    a.current.fps += 1000 / dt;
-    a.current.js += renderMs.current;
-    if (typeof window !== "undefined") {
-      const w = window as unknown as { __pc2d?: { commits: number } };
-      if (w.__pc2d) {
-        a.current.patches += w.__pc2d.commits;
-        w.__pc2d.commits = 0;
-      }
-    }
-    if (a.current.n >= PERF_LOG_EVERY) {
-      const info = gl.info.render;
-      const gpuAvg = a.current.gpuN ? a.current.gpu / a.current.gpuN : NaN;
-      console.log(
-        `[render] fps=${(a.current.fps / a.current.n).toFixed(1)} ` +
-          `js=${(a.current.js / a.current.n).toFixed(2)}ms ` +
-          `gpu=${Number.isFinite(gpuAvg) ? gpuAvg.toFixed(2) : "-"}ms ` +
-          `draws=${info.calls} tris=${(info.triangles / 1000).toFixed(1)}k ` +
-          `pts=${info.points} patches=${a.current.patches}`
-      );
-      a.current.n = 0;
-      a.current.fps = 0;
-      a.current.js = 0;
-      a.current.gpu = 0;
-      a.current.gpuN = 0;
-      a.current.patches = 0;
-    }
-  });
-
-  return null;
 }
 
 export { THREE };

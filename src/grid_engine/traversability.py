@@ -12,21 +12,21 @@ def compute_traversability(
     ring_widths: np.ndarray,
     weights: list[float] | None = None,
     class_scores: list[float] | None = None,
-    z_diff_thresh: float = 0.12,
-    slope_thresh: float = 0.15,
+    z_diff_thresh: float = 0.5,
+    slope_thresh: float = 0.4,
 ) -> np.ndarray:
     n_cells = n_rings * n_theta
     if weights is None:
-        weights = [0.3, 0.3, 0.3, 0.1]
+        weights = [0.25, 0.25, 0.35, 0.15]
     if class_scores is None:
         class_scores = [1.0, 0.6, 0.2, 0.1]
 
     w_z, w_slope, w_cls, w_occ = weights
 
-    z_diff = z_max - z_min
+    z_diff = np.maximum(z_max - z_mean, 0.0)
     z_score = np.clip(1.0 - z_diff / (z_diff_thresh * 3), 0, 1)
 
-    slope = _neighbor_slope(z_mean, n_rings, n_theta, ring_widths)
+    slope = _neighbor_slope(z_mean, n_rings, n_theta, ring_widths, occupancy)
     slope_score = np.clip(1.0 - slope / slope_thresh, 0, 1)
 
     cls_lut = np.zeros(256, dtype=np.float32)
@@ -47,16 +47,23 @@ def _neighbor_slope(
     n_rings: int,
     n_theta: int,
     ring_widths: np.ndarray,
+    occupancy: np.ndarray | None = None,
 ) -> np.ndarray:
     grid = z_mean.reshape(n_rings, n_theta)
+    active = np.ones_like(grid, dtype=bool)
+    if occupancy is not None:
+        active = (occupancy.reshape(n_rings, n_theta) > 0.05)
     padded = np.pad(grid, ((1, 1), (1, 1)), mode="edge")
+    padded_active = np.pad(active, ((1, 1), (1, 1)), mode="constant", constant_values=False)
     max_diff = np.zeros_like(grid)
     for di in range(-1, 2):
         for dj in range(-1, 2):
             if di == 0 and dj == 0:
                 continue
             neighbor = padded[1 + di : n_rings + 1 + di, 1 + dj : n_theta + 1 + dj]
-            max_diff = np.maximum(max_diff, np.abs(grid - neighbor))
+            neighbor_active = padded_active[1 + di : n_rings + 1 + di, 1 + dj : n_theta + 1 + dj]
+            diff = np.where(neighbor_active, np.abs(grid - neighbor), 0.0)
+            max_diff = np.maximum(max_diff, diff)
 
     ring_idx = np.arange(n_rings).reshape(-1, 1)
     widths = ring_widths[ring_idx]

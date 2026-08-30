@@ -20,10 +20,10 @@ decay:
 
 traversability:
   enabled: true
-  weights: [0.3, 0.3, 0.3, 0.1]   # [z_score, slope_score, class_score, occ_score]
-  z_diff_thresh: 0.12              # height variation threshold (m) — above this = steep
-  slope_thresh: 0.15              # neighbor slope threshold — above this = steep
-  class_scores: [1.0, 0.6, 0.2, 0.1]  # per-class: drivable=1.0, terrain=0.6, static=0.2, dynamic=0.1
+  weights: [0.25, 0.25, 0.35, 0.15]  # [z_score, slope_score, class_score, occ_score]
+  z_diff_thresh: 0.5                 # height above mean threshold (m) — above this = steep
+  slope_thresh: 0.4                  # neighbor slope threshold — above this = steep (~22 deg)
+  class_scores: [1.0, 0.6, 0.2, 0.1]    # per-class: drivable=1.0, terrain=0.6, static=0.2, dynamic=0.1
 
 memory:
   uniform_cell_guess: 200.0  # uniform 5cm grid square side (m) used for equivalent count (spec says 200 m)

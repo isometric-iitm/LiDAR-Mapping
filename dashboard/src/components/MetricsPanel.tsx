@@ -40,15 +40,24 @@ function Bar({ label, widthPct, color, value, unit }: { label: string; widthPct:
 
 function AnimatedCounter({ target }: { target: number }) {
   const [value, setValue] = useState(0);
+  const prevTarget = useRef(0);
   const raf = useRef(0);
   useEffect(() => {
     if (target <= 0) return;
+    const prev = prevTarget.current;
+    const jump = prev > 0 && Math.abs(target - prev) / prev < 0.05;
+    prevTarget.current = target;
+    if (jump) {
+      setValue(Math.round(target));
+      return;
+    }
     const duration = 1500;
     const start = performance.now();
+    const from = value;
     const tick = (now: number) => {
       const t = Math.min(1, (now - start) / duration);
       const ease = 1 - Math.pow(1 - t, 3);
-      setValue(Math.round(ease * target));
+      setValue(Math.round(from + (target - from) * ease));
       if (t < 1) raf.current = requestAnimationFrame(tick);
     };
     raf.current = requestAnimationFrame(tick);
@@ -128,13 +137,14 @@ export default function MetricsPanel({
             <Row k="Pack" v={`${fmt(stats?.pack_ms)}`} sub="ms" />
             <Row k="Cloud" v={`${fmt(stats?.cloud_ms)}`} sub="ms" />
           </div>
-          <Row k="Compression" v={`${fmt(stats?.compression_ratio, 1)}`} sub="x" />
+          <Row k="Compression" v={`${fmt(stats?.compression_ratio, 1)}`} sub="×" />
+          <Row k="Frames dropped" v={`${stats?.frames_dropped ?? 0}`} />
         </div>
       </div>
 
       <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
         <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-          Memory · live
+          Memory
         </h3>
         <div className="mb-3 rounded border border-sky-800/40 bg-sky-950/30 px-3 py-2 text-center">
           <span className="font-mono text-2xl font-bold tabular-nums text-sky-400">
@@ -158,26 +168,7 @@ export default function MetricsPanel({
             value={fmt(mb, 1)}
             unit="MB"
           />
-          <p className="text-[10px] leading-4 text-zinc-600">
-            Same scene stored two ways. The bar lengths are log-scaled; the grid
-            really is ~2,400× smaller per header above.
-          </p>
         </div>
-      </div>
-
-      <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
-        <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-          Distance accuracy
-        </h3>
-        <div className="space-y-1">
-          <Row k="0–10 m" v="85%" />
-          <Row k="10–20 m" v="84%" />
-          <Row k="20–40 m" v="72%" />
-          <Row k="40–80 m" v="58%" />
-        </div>
-        <p className="mt-1 text-[9px] leading-3 text-zinc-600">
-          Pixel mIoU (4-class) by distance band — GPU eval on seq 08
-        </p>
       </div>
 
       <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
@@ -236,7 +227,7 @@ export default function MetricsPanel({
             <Row k="Cell width" v={hover.cellWidth} />
           </div>
         ) : (
-          <p className="text-[11px] text-zinc-600">Hover a block in the map to inspect its height.</p>
+          <p className="text-[11px] text-zinc-600">Hover a block in the map to inspect.</p>
         )}
       </div>
     </aside>

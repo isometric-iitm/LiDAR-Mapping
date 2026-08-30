@@ -19,13 +19,14 @@ const fmt = (sec: number) => {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 };
 
-const SPEEDS = [0.5, 1, 2, 5];
+const SPEEDS = [0.5, 1, 2, 4];
 
 export default function Timeline({ seqPos, seqLen, paused, speed, seeking, onPause, onSeek, onSpeed }: Props) {
   const [dragging, setDragging] = useState(false);
   const [scrubFrac, setScrubFrac] = useState<number | null>(null);
   const trackRef = useRef<HTMLDivElement>(null);
   const lastSend = useRef(0);
+  const lastCommittedFrac = useRef(-1);
 
   const frac = seqLen > 0 ? Math.min(1, Math.max(0, seqPos / seqLen)) : 0;
   const shown = dragging && scrubFrac !== null ? scrubFrac : frac;
@@ -40,6 +41,8 @@ export default function Timeline({ seqPos, seqLen, paused, speed, seeking, onPau
   };
 
   const commitSeek = (f: number) => {
+    if (lastCommittedFrac.current >= 0 && Math.abs(f - lastCommittedFrac.current) < 0.005) return;
+    lastCommittedFrac.current = f;
     const idx = Math.max(0, Math.min(seqLen - 1, Math.round(f * (seqLen - 1))));
     onSeek(idx);
   };

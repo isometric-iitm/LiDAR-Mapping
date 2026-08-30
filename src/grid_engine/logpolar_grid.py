@@ -4,6 +4,8 @@ from pathlib import Path
 import numpy as np
 import yaml
 
+from src.grid_engine.traversability import compute_traversability
+
 UNKNOWN = 255
 
 
@@ -78,11 +80,12 @@ class LogPolarGrid:
         # traversability config
         trav_cfg = cfg.get("traversability", {})
         self.trav_enabled = trav_cfg.get("enabled", True)
-        self.trav_weights = trav_cfg.get("weights", [0.3, 0.3, 0.3, 0.1])
+        self.trav_weights = trav_cfg.get("weights", [0.25, 0.25, 0.35, 0.15])
         self.trav_class_scores = trav_cfg.get("class_scores", [1.0, 0.6, 0.2, 0.1])
-        self.trav_z_diff_thresh = trav_cfg.get("z_diff_thresh", 0.12)
-        self.trav_slope_thresh = trav_cfg.get("slope_thresh", 0.15)
+        self.trav_z_diff_thresh = trav_cfg.get("z_diff_thresh", 0.5)
+        self.trav_slope_thresh = trav_cfg.get("slope_thresh", 0.4)
         self.traversability = np.zeros(self.n_cells, dtype=np.float32)
+        self._trav_dirty = False
 
         # last-sent display values (change detection for incremental deltas)
         self._sent_zmax = np.zeros(self.n_cells, dtype=np.float32)
@@ -91,7 +94,7 @@ class LogPolarGrid:
         # so the grid and the point cloud share a common "ground = 0" reference
         self.ground_z = 0.0
 
-        # per-frame scratch
+        # per-frame scratch + seen tracking (robust first-hit detection)
         self._z_min_f = np.full(self.n_cells, np.inf, dtype=np.float32)
         self._z_max_f = np.full(self.n_cells, -np.inf, dtype=np.float32)
         self._z_sum_f = np.zeros(self.n_cells, dtype=np.float64)
@@ -99,6 +102,7 @@ class LogPolarGrid:
         self._cls_count_f = np.zeros((self.n_cells, self.n_classes), dtype=np.int32)
         self._prev_rendered = np.zeros(self.n_cells, dtype=bool)
         self._touched = np.zeros(self.n_cells, dtype=bool)
+        self._ever_seen = np.zeros(self.n_cells, dtype=bool)
 
     # --- geometry ---
     def ring_index(self, r: np.ndarray) -> np.ndarray:
@@ -142,7 +146,8 @@ class LogPolarGrid:
         j = self.sector_index(tk)
         cells = i * self.n_theta + j
 
-        # decay all cells a step
+        # decay all cells a step — snapshot rendered state BEFORE decay for freed detection
+        pre_rendered = self.occupancy > self.occ_threshold
         decay = math.exp(-(1.0 / self.frame_hz) / self.tau_free)
         self.occupancy *= decay
         self.dynamic_score *= decay
@@ -183,11 +188,27 @@ class LogPolarGrid:
         self.cls_hist[uniq] = self.cls_hist[uniq] * 0.6 + frac * 0.4
         self.dominant_class[uniq] = np.argmax(self.cls_hist[uniq], axis=1).astype(np.uint8)
 
-        # z-stat update (persistent)
-        self._z_min_state[uniq] = np.minimum(self._z_min_state[uniq], zmin_c.astype(np.float32))
-        self._z_max_state[uniq] = np.maximum(self._z_max_state[uniq], zmax_c.astype(np.float32))
+        # z-stat update: first-hit seeds directly (avoids 0→true_z drift that
+        # produced a dome-shaped ~1.2m bias on freshly seen rings after reload)
         new_mean = zsum_c / seg_count
-        self.z_mean[uniq] = self.z_mean[uniq] * 0.7 + new_mean.astype(np.float32) * 0.3
+        first_seen = ~self._ever_seen[uniq]
+        self.z_mean[uniq] = np.where(
+            first_seen,
+            new_mean.astype(np.float32),
+            self.z_mean[uniq] * 0.7 + new_mean.astype(np.float32) * 0.3,
+        )
+        # seed min/max directly for first-seen; running min/max for seen
+        fs_idx = np.flatnonzero(first_seen)
+        if fs_idx.size:
+            fsu = uniq[fs_idx]
+            self._z_min_state[fsu] = zmin_c[fs_idx].astype(np.float32)
+            self._z_max_state[fsu] = zmax_c[fs_idx].astype(np.float32)
+        rs_idx = np.flatnonzero(~first_seen)
+        if rs_idx.size:
+            rsu = uniq[rs_idx]
+            self._z_min_state[rsu] = np.minimum(self._z_min_state[rsu], zmin_c[rs_idx].astype(np.float32))
+            self._z_max_state[rsu] = np.maximum(self._z_max_state[rsu], zmax_c[rs_idx].astype(np.float32))
+        self._ever_seen[uniq] = True
 
         # dynamics: K-frame ring buffer occupancy change detection
         # (replaces single-flip with lookback over dyn_ring_k frames)
@@ -200,13 +221,28 @@ class LogPolarGrid:
         self._occ_ringbuf[self._ring_ptr % k] = now_occ
         self._ring_ptr += 1
 
+        # freed by decay — stale world content has scrolled past this polar cell;
+        # clear height / class so the next hit starts fresh (prevents radial
+        # ghost terrain and empty holes where dynamic left but stale _z_max kept
+        # height inflated or cls_hist kept the blue tint).
+        post_rendered = self.occupancy > self.occ_threshold
+        newly_freed = pre_rendered & ~post_rendered
+        if np.any(newly_freed):
+            self._z_min_state[newly_freed] = np.inf
+            self._z_max_state[newly_freed] = -np.inf
+            self.z_mean[newly_freed] = 0
+            self._ever_seen[newly_freed] = False
+            self.cls_hist[newly_freed] = 0
+            self.dominant_class[newly_freed] = UNKNOWN
+            self.traversability[newly_freed] = 0
+
         # bookkeeping
         self.last_update[uniq] = self.frame
         self.frame += 1
+        self._trav_dirty = True
 
         # traversability: per-cell drivability score (0-1)
-        if self.trav_enabled:
-            from src.grid_engine.traversability import compute_traversability
+        if self.trav_enabled and self._trav_dirty:
             self.traversability = compute_traversability(
                 self._z_min_state, self._z_max_state, self.z_mean,
                 self.dominant_class, self.occupancy,
@@ -216,6 +252,7 @@ class LogPolarGrid:
                 z_diff_thresh=self.trav_z_diff_thresh,
                 slope_thresh=self.trav_slope_thresh,
             )
+            self._trav_dirty = False
 
         n_hit = len(uniq)
         self._clear_scratch()
@@ -256,7 +293,7 @@ class LogPolarGrid:
     def snapshot(self) -> dict:
         """Full snapshot of rendered cells.
 
-        Returns {frame, rows: (k,6) float32 [i, j, z_mean, z_max, occ, dyn],
+        Returns {frame, rows: (k,7) float32 [i, j, z_mean, z_max, occ, dyn, trav],
         cls: (k,) uint8} — raw arrays, packed to binary by the protocol layer.
         Marks every cell as sent so subsequent deltas are purely incremental.
         """
@@ -265,7 +302,7 @@ class LogPolarGrid:
         if idx.size:
             rows, cls = self._rows(idx)
         else:
-            rows = np.zeros((0, 6), dtype=np.float32)
+            rows = np.zeros((0, 7), dtype=np.float32)
             cls = np.zeros(0, dtype=np.uint8)
         self._prev_rendered = mask
         self._mark_sent(idx)
@@ -277,7 +314,7 @@ class LogPolarGrid:
     def delta(self) -> dict:
         """Changed cells since last call.
 
-        Returns {frame, rows: (k,6) float32 [i, j, z_mean, z_max, occ, dyn],
+        Returns {frame, rows: (k,7) float32 [i, j, z_mean, z_max, occ, dyn, trav],
         cls: (k,) uint8, freed: (m,2) float32 [i, j]} — raw arrays.
 
         Includes: cells that toggled rendered state (added/freed) AND cells
@@ -300,7 +337,7 @@ class LogPolarGrid:
         if idx.size:
             rows, cls = self._rows(idx)
         else:
-            rows = np.zeros((0, 6), dtype=np.float32)
+            rows = np.zeros((0, 7), dtype=np.float32)
             cls = np.zeros(0, dtype=np.uint8)
         self._prev_rendered = mask
         self._mark_sent(idx)
@@ -323,12 +360,30 @@ class LogPolarGrid:
         }
 
     def reset(self):
-        self.__init__()
+        self.z_mean[:] = 0
+        self._z_min_state[:] = np.inf
+        self._z_max_state[:] = -np.inf
+        self.cls_hist[:] = 0
+        self.dominant_class[:] = UNKNOWN
+        self.occupancy[:] = 0
+        self.dynamic_score[:] = 0
+        self.last_update[:] = 0
+        self.frame = 0
+        self._occ_ringbuf[:] = False
+        self._ring_ptr = 0
+        self._ever_seen[:] = False
+        self.traversability[:] = 0
+        self._trav_dirty = False
+        self._sent_zmax[:] = 0
+        self._sent_cls[:] = UNKNOWN
+        self.ground_z = 0.0
+        self._prev_rendered[:] = False
+        self._clear_scratch()
 
     # --- memory accountant (PROJECT_SPEC §9.2 / acceptance criterion) ---
     @property
     def bytes_per_cell(self) -> float:
-        return 3 * 4 + self.n_classes * 4 + 1 + 4 + 4 + 8
+        return 3 * 4 + self.n_classes * 4 + 1 + 4 + 4 + 4 + 8
 
     def memory_report(self) -> dict:
         grid_bytes = self.n_cells * self.bytes_per_cell

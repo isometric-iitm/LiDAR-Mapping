@@ -43,8 +43,10 @@ class Pipeline:
         )
         self.grid = LogPolarGrid()
         self.grid_lock = threading.Lock()
-        self.messages: queue.Queue = queue.Queue(maxsize=120)
+        self.messages: queue.Queue = queue.Queue(maxsize=8)
         self.pause_event = threading.Event()
+        self._frames_emitted = 0
+        self._frames_dropped = 0
         # start paused: the dashboard must explicitly press Play (auto-play
         # off on page load). Seek previews still render one frame while paused.
         self.speed = float(src["playback_speed"])
@@ -134,10 +136,13 @@ class Pipeline:
         item = ("T", payload) if kind == "text" else ("B", payload)
         try:
             self.messages.put_nowait(item)
+            self._frames_emitted += 1
         except queue.Full:
             self._drop_oldest()
+            self._frames_dropped += 1
             try:
                 self.messages.put_nowait(item)
+                self._frames_emitted += 1
             except queue.Full:
                 pass
 
@@ -313,6 +318,8 @@ class Pipeline:
             "n_cells": mem["n_cells"],
             "seq_pos": self.replayer.i,
             "seq_len": len(self.replayer),
+            "frames_emitted": self._frames_emitted,
+            "frames_dropped": self._frames_dropped,
         }
 
 
@@ -417,9 +424,14 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.get("/health")
     async def health():
+        from src.common.config import resolve_path
+        ckpt = resolve_path(cfg["model"]["checkpoint"])
         return {"status": "ok", "n_rings": pipeline.grid.n_rings,
                 "n_theta": pipeline.grid.n_theta,
-                "frame": pipeline.grid.frame}
+                "frame": pipeline.grid.frame,
+                "device": str(pipeline.segmenter.device),
+                "precision": pipeline.segmenter.precision,
+                "checkpoint_exists": Path(str(ckpt)).is_file()}
 
     @app.get("/snapshot")
     async def snapshot():
@@ -434,6 +446,16 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     @app.get("/metrics/memory")
     async def metrics_memory():
         return pipeline.grid.memory_report()
+
+    @app.get("/metrics/eval")
+    async def metrics_eval():
+        from src.common.config import repo_root
+        results_dir = repo_root() / "results"
+        jsons = sorted(results_dir.glob("eval_*.json"))
+        if not jsons:
+            return {"error": "no eval results found"}
+        with open(jsons[-1], encoding="utf-8") as f:
+            return json.load(f)
 
     @app.websocket("/ws/map")
     async def ws_map(ws: WebSocket):

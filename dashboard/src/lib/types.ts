@@ -1,3 +1,4 @@
+/** Cell tuple: [i, j, zMean, zMax, cls, occ, dyn, trav] */
 export type Cell = [number, number, number, number, number, number, number, number];
 
 export type GridMeta = {
@@ -31,6 +32,8 @@ export type Stats = {
   seq_pos?: number;
   seq_len?: number;
   epoch?: number;
+  frames_emitted?: number;
+  frames_dropped?: number;
 };
 
 export type SnapshotMsg = {
