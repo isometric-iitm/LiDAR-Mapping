@@ -5,6 +5,7 @@ import type { AckMsg, Cell, DeltaMsg, GridMeta, SnapshotMsg, Stats } from "./typ
 
 export type CellMap = Map<string, Cell>;
 export type ConnState = "connecting" | "open" | "closed";
+export type StatusState = "loading" | "buffering" | "ready" | "error";
 
 /** Incremental render patch: only the cells that actually changed arrive
  *  from a delta, so the scene can update a few thousand instances instead of
@@ -32,6 +33,9 @@ export type UseMapStream = {
   send: (msg: object) => void;
   seqId: string;
   switchSequence: (seqId: string) => void;
+  status: StatusState;
+  statusMsg: string | null;
+  buffering: boolean;
 };
 
 const WS_URL = process.env.NEXT_PUBLIC_PC2D_WS ?? "ws://localhost:8000/ws/map";
@@ -48,6 +52,7 @@ type MapMsg =
   | GridMeta
   | Stats
   | AckMsg
+  | { type: "status"; state: string; msg?: string; seq_id?: string }
   | (SnapshotMsg & { yaw?: number })
   | (DeltaMsg & { yaw?: number })
   | ({
@@ -118,6 +123,9 @@ export function useMapStream(): UseMapStream {
   const [heading, setHeading] = useState(0);
   const [patch, setPatch] = useState<CellPatch | null>(null);
   const [seqId, setSeqId] = useState("");
+  const [status, setStatus] = useState<StatusState>("loading");
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [buffering, setBuffering] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const full = useRef<Map<string, Cell>>(new Map());
@@ -178,6 +186,15 @@ export function useMapStream(): UseMapStream {
           setCells(new Map());
           setPatch({ kind: "reset", frame: 0 });
           if ("seq_id" in msg && typeof msg.seq_id === "string") setSeqId(msg.seq_id);
+          return;
+        }
+
+        if (msg.type === "status") {
+          const s = (msg as { state: string }).state as StatusState;
+          setStatus(s);
+          setStatusMsg((msg as { msg?: string }).msg ?? null);
+          if (s === "loading" || s === "buffering") setBuffering(true);
+          else if (s === "ready") setBuffering(false);
           return;
         }
 
@@ -272,6 +289,7 @@ export function useMapStream(): UseMapStream {
             setLastFrame(msg.frame);
             setPatch({ kind: "delta", frame: msg.frame, upserts: deltaAcc.current, frees: msg.freed });
             deltaAcc.current = [];
+            if (full.current.size > 0) setBuffering(false);
           }
           return;
         }
@@ -289,6 +307,7 @@ export function useMapStream(): UseMapStream {
             setCells(new Map(full.current));
             setLastFrame(msg.frame);
             setPatch({ kind: "snap", frame: msg.frame, upserts: [...snapBuf.current.values()] });
+            if (full.current.size > 0) setBuffering(false);
           }
         }
       };
@@ -368,5 +387,8 @@ export function useMapStream(): UseMapStream {
     send,
     seqId,
     switchSequence,
+    status,
+    statusMsg,
+    buffering,
   };
 }

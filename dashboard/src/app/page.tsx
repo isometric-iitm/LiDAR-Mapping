@@ -6,7 +6,7 @@ import * as THREE from "three";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, OrthographicCamera, PerspectiveCamera } from "@react-three/drei";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
-import { Compass } from "iconoir-react";
+import { Compass, Refresh } from "iconoir-react";
 import MetricsPanel, { type ViewMode } from "@/components/MetricsPanel";
 import Timeline from "@/components/Timeline";
 import { CLASSES } from "@/lib/colors";
@@ -157,6 +157,9 @@ export default function Home() {
     send,
     seqId,
     switchSequence,
+    status,
+    statusMsg,
+    buffering,
   } = useMapStream();
   const [paused, setPaused] = useState(true);
   const [speed, setSpeed] = useState(1);
@@ -232,7 +235,7 @@ export default function Home() {
       <div className="flex min-h-0 flex-1">
         <div className="relative min-w-0 flex-1">
           <Canvas
-            frameloop="always"
+            frameloop="demand"
             dpr={[1, 2]}
             onCreated={({ gl }) => {
               gl.toneMappingExposure = 1;
@@ -299,6 +302,21 @@ export default function Home() {
               />
             )}
           </Canvas>
+
+          {/* -- Loading / buffering overlay -------------------------------- */}
+          {buffering && (
+            <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center bg-black/60 backdrop-blur-[2px]">
+              <div className="frost flex flex-col items-center gap-3 px-6 py-5">
+                <Refresh className="h-6 w-6 animate-spin text-cyan-400" />
+                <div className="text-sm font-medium text-zinc-100">{statusMsg ?? (status === "loading" ? "Loading model\u2026" : "Buffering first frame\u2026")}</div>
+              </div>
+            </div>
+          )}
+          {!buffering && cells.size === 0 && meta && (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+              <div className="frost px-4 py-2 text-xs text-zinc-400">Press Play to start</div>
+            </div>
+          )}
 
           {/* -- HUD top chrome: legend (left) / camera controls (right) --- */}
           <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-3">
@@ -375,6 +393,7 @@ export default function Home() {
             paused={paused}
             speed={speed}
             seeking={seeking}
+            buffering={buffering}
             seqId={seqId}
             availableSeqs={availableSeqs}
             onPause={handlePause}

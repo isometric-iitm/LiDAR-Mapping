@@ -543,7 +543,6 @@ export function PerfOverlay({ onStats }: { onStats?: (s: { fps: number; js: numb
       const avgFps = acc.current.sumFps / acc.current.n;
       const avgJs = acc.current.sumJs / acc.current.n;
       onStats?.({ fps: avgFps, js: avgJs, draws: info.calls, tris: info.triangles });
-      console.log(`[perf] fps=${avgFps.toFixed(1)} js=${avgJs.toFixed(2)}ms draws=${info.calls} tris=${(info.triangles/1000).toFixed(1)}k`);
       acc.current = { n: 0, sumFps: 0, sumJs: 0 };
     }
   });

@@ -79,6 +79,11 @@ class Pipeline:
         self._replayer_lock = threading.Lock()
         self._preview = False  # process exactly one frame on the next loop pass
 
+        # readiness: set after Pipeline fully initialized + first frame emitted
+        self.ready = threading.Event()
+        self._first_frame_emitted = False
+        self.ready.set()
+
     def start(self):
         self.running = True
         self.replayer.playback_speed = self.speed
@@ -287,6 +292,9 @@ class Pipeline:
                   ws_protocol.iter_delta_frames(snap["frame"], self.epoch, snap["rows"], snap["cls"], snap["freed"], yaw_cd=yaw_cd))
         for b in frames:
             self._emit(b, "binary")
+        if not self._first_frame_emitted:
+            self._first_frame_emitted = True
+            self._emit({"type": "status", "state": "ready", "msg": "Streaming", "seq_id": self.seq_id}, "text")
         t_pack = time.perf_counter()
 
         # cloud only streams while a cloud view is active
@@ -341,13 +349,8 @@ class Pipeline:
                     tot = 0
             except:
                 tot = behind = front = -1
-            print(f"[perf] avg{n} seg={avg['seg']:.1f}ms grid={avg['grid']:.1f}ms pack={avg['pack']:.1f}ms proc={avg['proc']:.1f}ms q={qd} drop={self._frames_dropped} rendered={tot} front={front} behind={behind}")
             self._perf_n = 0
             self._perf_sum = {"seg": 0.0, "grid": 0.0, "pack": 0.0, "proc": 0.0}
-        elif proc_ms > 400.0:
-            print(f"[slow] frame {self.grid.frame}: seg={timings.get('total', 0.0):.0f}ms "
-                  f"grid={grid_ms:.1f}ms pack={pack_ms:.1f}ms cloud={cloud_ms:.1f}ms "
-                  f"n_cells={self._mem['n_cells'] if self._mem else 0}")
 
         if stats_msg is not None:
             stats_msg["epoch"] = self.epoch
@@ -542,7 +545,16 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                 "frame": pipeline.grid.frame,
                 "device": str(pipeline.segmenter.device),
                 "precision": pipeline.segmenter.precision,
-                "checkpoint_exists": Path(str(ckpt)).is_file()}
+                "checkpoint_exists": Path(str(ckpt)).is_file(),
+                "model_ready": pipeline.ready.is_set(),
+                "first_frame_emitted": pipeline._first_frame_emitted}
+
+    @app.get("/ready")
+    async def ready():
+        if pipeline.ready.is_set():
+            return {"status": "ready"}
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=503, content={"status": "loading", "model_ready": False})
 
     @app.get("/snapshot")
     async def snapshot():
@@ -594,6 +606,12 @@ def create_app(cfg: dict | None = None) -> FastAPI:
         meta["seq_id"] = pipeline.seq_id
         meta["seq_len"] = len(pipeline.replayer)
         await ws.send_text(json.dumps(meta))
+        if pipeline.ready.is_set():
+            await ws.send_text(json.dumps(
+                {"type": "status", "state": "ready", "msg": "Ready", "seq_id": pipeline.seq_id}))
+        else:
+            await ws.send_text(json.dumps(
+                {"type": "status", "state": "loading", "msg": "Loading model\u2026", "seq_id": pipeline.seq_id}))
         try:
             while True:
                 raw = await ws.receive_text()
@@ -613,6 +631,9 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                         print(f"[ws] play ack frame={pipeline.grid.frame}")
                         await ws.send_text(json.dumps(
                             {"type": "control_ack", "action": "play", "frame": pipeline.grid.frame}))
+                        if not pipeline._first_frame_emitted:
+                            await ws.send_text(json.dumps(
+                                {"type": "status", "state": "buffering", "msg": "Processing first frame\u2026", "seq_id": pipeline.seq_id}))
                     elif action == "speed":
                         pipeline.set_speed(data.get("value", 1.0))
                     elif action == "cloud":

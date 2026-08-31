@@ -11,6 +11,7 @@ type Props = {
   paused: boolean;
   speed: number;
   seeking: boolean;
+  buffering: boolean;
   seqId: string;
   availableSeqs: SeqInfo[];
   onPause: (p: boolean) => void;
@@ -27,7 +28,7 @@ const fmt = (sec: number) => {
 
 const SPEEDS = [0.5, 1, 2, 4];
 
-export default function Timeline({ seqPos, seqLen, paused, speed, seeking, seqId, availableSeqs, onPause, onSeek, onSpeed, onSwitchSeq }: Props) {
+export default function Timeline({ seqPos, seqLen, paused, speed, seeking, buffering, seqId, availableSeqs, onPause, onSeek, onSpeed, onSwitchSeq }: Props) {
   const [dragging, setDragging] = useState(false);
   const [scrubFrac, setScrubFrac] = useState<number | null>(null);
   const trackRef = useRef<HTMLDivElement>(null);
@@ -57,11 +58,11 @@ export default function Timeline({ seqPos, seqLen, paused, speed, seeking, seqId
     <div className="frost pointer-events-auto absolute inset-x-0 bottom-4 mx-auto flex w-[min(720px,94%)] items-center gap-3 px-4 py-2 text-xs text-zinc-200">
       <button
         onClick={() => onPause(!paused)}
-        disabled={seeking}
+        disabled={seeking || buffering}
         className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[4px] bg-zinc-800 text-zinc-200 transition-colors hover:bg-zinc-700 disabled:cursor-wait disabled:opacity-60"
-        title={seeking ? "Loading..." : paused ? "Resume playback" : "Freeze playback"}
+        title={seeking || buffering ? "Loading\u2026" : paused ? "Resume playback" : "Freeze playback"}
       >
-        {seeking ? (
+        {seeking || buffering ? (
           <Refresh className="h-4 w-4 animate-spin" strokeWidth={2} />
         ) : paused ? (
           <Play className="h-4 w-4" strokeWidth={2} />
