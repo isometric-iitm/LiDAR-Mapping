@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import json
 import math
 import queue
@@ -27,7 +27,7 @@ class Pipeline:
         self.cfg = cfg
         src = cfg["source"]
         mdl = cfg["model"]
-        # seq_dir and checkpoint may be relative to the repo root — resolve them
+        # seq_dir and checkpoint may be relative to the repo root â€” resolve them
         # so we don't depend on the process CWD.
         seq_dir = resolve_path(src["seq_dir"])
         self.seq_base_dir = seq_dir.parent
@@ -76,6 +76,17 @@ class Pipeline:
         self._stats_iv = int(self.cfg["server"].get("stats_interval_frames", 10))
         self._wire_compress = bool(self.cfg["server"].get("wire_compress", False))
 
+        # Two-stage pipelining: the GPU segmenter runs on its own thread ahead
+        # of the CPU grid/pack/emit stage, so the segmenter's device->host sync
+        # (.cpu()) overlaps the previous frame's grid work instead of stalling
+        # the single pipeline thread. `stages: auto` (default) enables it;
+        # `stages: single` restores the exact previous serial behavior.
+        self._stages = str(self.cfg.get("pipeline", {}).get("stages", "auto")).lower()
+        # bounded look-ahead of segmented frames: maxsize 2 keeps at most ~1
+        # frame of lead so seek latency stays small and ordering is preserved.
+        self._prefetch: queue.Queue = queue.Queue(maxsize=2)
+        self._seg_thread = None
+
         # rolling world-frame cloud history (for the ego-anchored accumulation view)
         self.cloud_history_frames = int(self.cfg["server"].get("cloud_history_frames", 30))
         self._cloud_hist: deque = deque(maxlen=self.cloud_history_frames)
@@ -93,11 +104,19 @@ class Pipeline:
     def start(self):
         self.running = True
         self.replayer.playback_speed = self.speed
-        self._thread = threading.Thread(target=self._loop, daemon=True, name="pipeline")
-        self._thread.start()
+        if self._stages == "auto":
+            self._thread = threading.Thread(target=self._grid_loop, daemon=True, name="grid")
+            self._seg_thread = threading.Thread(target=self._seg_loop, daemon=True, name="seg")
+            self._thread.start()
+            self._seg_thread.start()
+        else:
+            self._thread = threading.Thread(target=self._single_loop, daemon=True, name="pipeline")
+            self._thread.start()
 
     def stop(self):
         self.running = False
+        if self._seg_thread:
+            self._seg_thread.join(timeout=5)
         if self._thread:
             self._thread.join(timeout=5)
 
@@ -135,6 +154,7 @@ class Pipeline:
                 self.messages.get_nowait()
             except queue.Empty:
                 break
+        self._drain_prefetch()
         self._cloud_hist.clear()
         self._frame_time_window.clear()
         for buf in self._stage_window.values():
@@ -185,6 +205,7 @@ class Pipeline:
                 self.messages.get_nowait()
             except queue.Empty:
                 break
+        self._drain_prefetch()
         self.epoch += 1
         with self._seek_lock:
             self._preview = True
@@ -243,7 +264,7 @@ class Pipeline:
         If the whole frame cannot fit, drop it as a unit (never deliver a
         truncated/partial frame) and drain queued binary frames to make room.
         Returns True if the frame was successfully sent, False if it was
-        dropped entirely — the caller may then preserve state (e.g. freed
+        dropped entirely â€” the caller may then preserve state (e.g. freed
         rows) for a later merge instead of silently losing them.
         """
         is_binary = kind != "text"
@@ -253,7 +274,7 @@ class Pipeline:
         q = self.messages
         n = len(items)
         if q.qsize() + n > q.maxsize:
-            # Whole frame won't fit — discard queued binary frames (keep text
+            # Whole frame won't fit â€” discard queued binary frames (keep text
             # stats/acks) and count every dropped binary chunk.
             kept: list = []
             while True:
@@ -276,40 +297,106 @@ class Pipeline:
         self._frames_emitted += n
         return True
 
-    def _loop(self):
+    def _single_loop(self):
         stats_iv = self.cfg["server"]["stats_interval_frames"]
         snap_iv = self.cfg["server"]["snapshot_interval_frames"]
         while self.running:
             try:
-                self._loop_step(stats_iv, snap_iv)
+                self._single_step(stats_iv, snap_iv)
             except Exception as e:  # surface errors, keep stream alive
                 import traceback
                 print("[pipeline] error:", e)
                 traceback.print_exc()
                 time.sleep(0.1)
 
-    def _loop_step(self, stats_iv: int, snap_iv: int):
+    def _single_render(self, frame, stats_iv: int, snap_iv: int, disk_ms: float = 0.0):
+        """Serial path: segment (GPU) then grid/emit inline on this thread."""
+        cls5, seg_t = self.segmenter.segment(frame.points)
+        cls4 = bin_5_to_4(cls5)
+        self._process_frame_seg(frame, cls4, seg_t, stats_iv, snap_iv, disk_ms=disk_ms)
+
+    def _single_step(self, stats_iv: int, snap_iv: int):
         # A seek preview must render even while paused: check before blocking.
         if self._take_preview():
             with self._replayer_lock:
                 frame = self.replayer.get(timeout=2.0)
             if frame is not None:
-                self._process_frame(frame, stats_iv, snap_iv)
+                self._single_render(frame, stats_iv, snap_iv)
             return
         if not self.pause_event.wait(timeout=0.25):
             return  # paused: retry at the top of the loop (still sees seeks)
+        td = time.perf_counter()
         with self._replayer_lock:
             frame = self.replayer.get(timeout=2.0)
+        disk_ms = (time.perf_counter() - td) * 1000.0
         if frame is None:
             time.sleep(0.05)
             return
-        self._process_frame(frame, stats_iv, snap_iv)
+        self._single_render(frame, stats_iv, snap_iv, disk_ms=disk_ms)
 
-    def _process_frame(self, frame, stats_iv: int, snap_iv: int):
+    # ------------------------------------------------------------------
+    # Two-stage pipeline (stages: auto)
+    #
+    #   SEG thread: paced replayer read (disk) -> GPU segment -> mailbox
+    #   GRID thread: mailbox -> bin_5_to_4 -> grid.update -> pack -> emit
+    #
+    # The single-slot handoff guarantees strict frame ordering while letting the
+    # GPU segmenter run up to ~1 frame ahead, hiding its device->host .cpu()
+    # sync behind the CPU grid work of the previous frame.
+    # ------------------------------------------------------------------
+
+    def _seg_loop(self):
+        while self.running:
+            try:
+                epoch = self.epoch
+                frame = None
+                if self._take_preview():
+                    # seek preview renders even while paused
+                    with self._replayer_lock:
+                        frame = self.replayer.get(timeout=2.0)
+                    disk_ms = 0.0
+                elif self.pause_event.wait(timeout=0.25):
+                    td = time.perf_counter()
+                    with self._replayer_lock:
+                        frame = self.replayer.get(timeout=2.0)
+                    disk_ms = (time.perf_counter() - td) * 1000.0
+                else:
+                    continue  # paused, no preview: retry at top
+                if frame is None:
+                    continue
+                cls5, seg_t = self.segmenter.segment(frame.points)
+                # Blocking put: if the grid thread is behind, we wait here (natural
+                # backpressure) rather than piling up stale frames.
+                self._prefetch.put((epoch, frame, cls5, seg_t, disk_ms))
+            except Exception as e:
+                import traceback
+                print("[seg] error:", e)
+                traceback.print_exc()
+                time.sleep(0.1)
+
+    def _grid_loop(self):
+        stats_iv = self.cfg["server"]["stats_interval_frames"]
+        snap_iv = self.cfg["server"]["snapshot_interval_frames"]
+        while self.running:
+            try:
+                epoch, frame, cls5, seg_t, disk_ms = self._prefetch.get(timeout=0.5)
+                if epoch != self.epoch:
+                    # stale frame from before a seek/switch — discard
+                    continue
+                cls4 = bin_5_to_4(cls5)
+                self._process_frame_seg(frame, cls4, seg_t, stats_iv, snap_iv, disk_ms=disk_ms)
+            except queue.Empty:
+                continue
+            except Exception as e:
+                import traceback
+                print("[grid] error:", e)
+                traceback.print_exc()
+                time.sleep(0.05)
+
+    def _process_frame_seg(self, frame, cls4, seg_timings: dict, stats_iv: int, snap_iv: int,
+                           disk_ms: float = 0.0):
         t0 = time.perf_counter()
-        cls5, timings = self.segmenter.segment(frame.points)
         t_seg = time.perf_counter()
-        cls4 = bin_5_to_4(cls5)
         stats_msg = None
         with self.grid_lock:
             self.grid.update(frame.points, cls4)
@@ -358,7 +445,7 @@ class Pipeline:
                 snap["frame"], self.epoch, snap["rows"], snap["cls"], freed, yaw_cd=yaw_cd))
             sent = self._emit_frame(frames, "binary")
             if not sent and freed.shape[0]:
-                # Frame dropped wholesale — preserve its frees for the next
+                # Frame dropped wholesale â€” preserve its frees for the next
                 # successful delta (cells are still not-rendered).
                 self._pending_free |= self._free_to_flat(freed)
         n_freed = freed.shape[0]
@@ -387,12 +474,12 @@ class Pipeline:
         update_ms = self.grid._timings.get("total_ms", 0.0)
         snap_ms = self.grid._timings.get("snapshot_ms", self.grid._timings.get("delta_ms", 0.0))
         pack_ms = (t_pack - t_grid) * 1000.0
-        self._stage_window["seg"].append(timings.get("total", 0.0))
+        self._stage_window["seg"].append(seg_timings.get("total", 0.0))
         self._stage_window["grid"].append(grid_ms)
         self._stage_window["pack"].append(pack_ms)
         self._stage_window["cloud"].append(cloud_ms)
-        self._project_window.append(timings.get("project", 0.0))
-        self._forward_window.append(timings.get("forward", 0.0))
+        self._project_window.append(seg_timings.get("project", 0.0))
+        self._forward_window.append(seg_timings.get("forward", 0.0))
         self._frame_time_window.append(proc_ms)
         for buf in (self._stage_window["seg"], self._stage_window["grid"],
                     self._stage_window["pack"], self._stage_window["cloud"],
@@ -403,7 +490,7 @@ class Pipeline:
 
         # detailed perf log every 30 frames (and on any slow frame)
         self._perf_n += 1
-        self._perf_sum["seg"] += timings.get('total', 0.0)
+        self._perf_sum["seg"] += seg_timings.get('total', 0.0)
         self._perf_sum["grid"] += grid_ms
         self._perf_sum["pack"] += pack_ms
         self._perf_sum["proc"] += proc_ms
@@ -415,6 +502,7 @@ class Pipeline:
             print(
                 f"[perf] f={self.grid.frame:5d} {tag:4s} | "
                 f"proc={avg['proc']:.1f}ms seg={avg['seg']:.1f} "
+                f"sync={seg_timings.get('sync',0.0):.1f} disk={disk_ms:.1f} "
                 f"update={update_ms:.1f} snap/delta={snap_ms:.1f} "
                 f"pack={avg['pack']:.1f} cloud={self._stage_window['cloud'][-1]:.1f} | "
                 f"rows={n_rows:5d} freed={n_freed:4d} chunks={n_chunks} "
@@ -485,6 +573,14 @@ class Pipeline:
             self.messages.get_nowait()
         except queue.Empty:
             pass
+
+    def _drain_prefetch(self):
+        """Discard any in-flight segmented frames (stale after a seek/switch)."""
+        while True:
+            try:
+                self._prefetch.get_nowait()
+            except queue.Empty:
+                break
 
     def _free_to_flat(self, freed: np.ndarray) -> set:
         """Convert freed rows [i,j] into a set of flat cell indices (i*n_theta+j)."""

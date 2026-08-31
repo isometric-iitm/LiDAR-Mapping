@@ -6,8 +6,19 @@ import numpy as np
 import yaml
 
 from src.grid_engine.traversability import compute_traversability
+from src.grid_engine import jit_reduce
 
 UNKNOWN = 255
+
+# Optional numba acceleration for the per-cell scatter-reduce in update().
+# Defaults on; any runtime failure flips it off and the pure-numpy path is
+# used for the rest of the process, so a compile/link hiccup never breaks a run.
+_jit_enabled = jit_reduce._NUMBA_OK
+
+
+def _set_jit_enabled(v: bool):
+    global _jit_enabled
+    _jit_enabled = bool(v)
 
 
 def load_grid_config(path: str | Path | None = None) -> dict:
@@ -161,47 +172,64 @@ class LogPolarGrid:
         t_occ = time.perf_counter()
 
         # grouped scatter-reduce: one stable sort + vectorized min/max/sum,
-        # replacing 5 unbuffered np.*.at calls (~10x faster, SIMD-friendly)
+        # replacing 5 unbuffered np.*.at calls (~10x faster, SIMD-friendly).
+        # The per-cell reduce AND per-cell class tally are fused into a single
+        # numba pass (jit_reduce.reduce_segments) when available; the pure-numpy
+        # path below is the exact fallback, so results are bit-identical either way.
         n = cells.shape[0]
         order = np.argsort(cells, kind="stable")
         csort = cells[order]
-        zsort = zk[order]
-        neq = np.concatenate(([True], csort[1:] != csort[:-1]))
-        firsts = np.flatnonzero(neq)
-        uniq = csort[firsts]
-        ends = np.concatenate((firsts[1:], [n]))
-        seg_count = ends - firsts
+        zsort = zk[order].astype(np.float32)
+        seg_labels = pck[order]
 
-        zmin_c = np.minimum.reduceat(zsort, firsts)
-        zmax_c = np.maximum.reduceat(zsort, firsts)
-        zsum_c = np.add.reduceat(zsort.astype(np.float64), firsts)
+        cls_counts_seg = None
+        if _jit_enabled:
+            try:
+                uniq, zmin_c, zmax_c, zsum_c, seg_count, cls_counts_seg = jit_reduce.reduce_segments(
+                    csort, zsort, seg_labels.astype(np.uint8), self.n_classes
+                )
+            except Exception:
+                _set_jit_enabled(False)
+        if cls_counts_seg is None:
+            # numpy fallback reduce (bit-identical to the JIT kernel)
+            neq = np.concatenate(([True], csort[1:] != csort[:-1]))
+            firsts = np.flatnonzero(neq)
+            uniq = csort[firsts]
+            ends = np.concatenate((firsts[1:], [n]))
+            seg_count = ends - firsts
+            zmin_c = np.minimum.reduceat(zsort, firsts)
+            zmax_c = np.maximum.reduceat(zsort, firsts)
+            zsum_c = np.add.reduceat(zsort.astype(np.float64), firsts)
         t_reduce = time.perf_counter()
 
         # class counts. Decay mode needs the full-grid bincount (for EMA over
         # all cells); precise mode only needs per-hit majority, computed from
-        # the already-sorted (by cell) class labels via per-segment bincounts.
+        # the already-sorted (by cell) class labels via per-segment counts.
         cls_counts = None
         if self.decay_enabled:
-            cls_key = csort.astype(np.int64) * self.n_classes + pck[order].astype(np.int64)
+            # Decay keeps its full-grid bincount (EMA over all cells) and only
+            # reuses the JIT/numpy reduce, so EMA semantics are unchanged.
+            cls_key = csort.astype(np.int64) * self.n_classes + seg_labels.astype(np.int64)
             cls_counts = np.bincount(cls_key, minlength=self.n_cells * self.n_classes).reshape(self.n_cells, self.n_classes)
             # stash per-frame scratch (scatter only the hit cells)
-            self._z_min_f[uniq] = zmin_c.astype(np.float32)
-            self._z_max_f[uniq] = zmax_c.astype(np.float32)
+            self._z_min_f[uniq] = zmin_c
+            self._z_max_f[uniq] = zmax_c
             self._z_sum_f[uniq] = zsum_c
             self._count_f[uniq] = seg_count
             self._cls_count_f[uniq] = cls_counts[uniq]
             self._touched[uniq] = True
         else:
-            # precise: per-hit majority vote (rows aligned to `uniq`).
-            # Fully vectorized: map each point to its unique-cell group index via
-            # searchsorted, then one bincount gives per-(cell,class) counts.
-            # Equivalent to the per-segment majority but ~10-20x faster (C-level).
-            seg_labels = pck[order]
-            local = np.searchsorted(uniq, csort)
-            cls_counts = np.bincount(
-                local * self.n_classes + seg_labels.astype(np.int64),
-                minlength=uniq.shape[0] * self.n_classes,
-            ).reshape(uniq.shape[0], self.n_classes)
+            # precise: per-hit majority vote (rows aligned to `uniq`). The JIT
+            # kernel yields these tallies directly in one pass; the numpy path
+            # recomputes them via a per-(cell,class) bincount. Both identical.
+            if cls_counts_seg is None:
+                local = np.searchsorted(uniq, csort)
+                cls_counts = np.bincount(
+                    local * self.n_classes + seg_labels.astype(np.int64),
+                    minlength=uniq.shape[0] * self.n_classes,
+                ).reshape(uniq.shape[0], self.n_classes)
+            else:
+                cls_counts = cls_counts_seg
         t_cls = time.perf_counter()
 
         if self.decay_enabled:

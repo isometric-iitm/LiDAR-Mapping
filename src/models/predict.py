@@ -70,17 +70,37 @@ class Segmenter:
 
         print(f"[Segmenter] loaded {ckpt_path} (best_miou={ckpt.get('best_miou', 'n/a'):.4f}) on {self.device} precision={self.precision}")
 
+        # Lazy-allocated pinned host buffer for async (non_blocking) H2D copies,
+        # so the CPU thread never stalls submitting the point cloud to the GPU.
+        self._pin = None  # np.ndarray (n,4) float32, pinned via torch.zeros(..., pin_memory=True)
+
+    def _pin_buffer(self, n: int) -> np.ndarray:
+        """Return a pinned float32 (n,4) host buffer large enough for n points."""
+        if self._pin is None or self._pin.shape[0] < n:
+            self._pin = torch.zeros((n, 4), dtype=torch.float32, pin_memory=True).numpy()
+        return self._pin
+
     @torch.inference_mode()
     def segment(self, points: np.ndarray) -> tuple[np.ndarray, dict]:
-        """Returns (per_point_class_ids [N] uint8 in [0,num_classes), timings dict)."""
-        t = {}
+        """Returns (per_point_class_ids [N] uint8 in [0,num_classes), timings dict).
+
+        Timings sub-fields (ms): project (H2D + projection + range image),
+        forward (UNet + softmax + knn gather), sync (argmax + device->host copy).
+        On CUDA the H2D copy is asynchronous (non_blocking) so submitting it does
+        not stall the CPU; the only blocking device sync is the final .cpu().
+        """
+        t = {"project": 0.0, "forward": 0.0, "sync": 0.0, "total": 0.0}
         if points.shape[0] == 0 or points.shape[1] < 4:
-            return np.zeros(0, dtype=np.uint8), {"project": 0.0, "forward": 0.0, "total": 0.0}
+            return np.zeros(0, dtype=np.uint8), {"project": 0.0, "forward": 0.0, "sync": 0.0, "total": 0.0}
 
         t0 = time.perf_counter()
         if self.device.type == "cuda":
-            # all projection math on GPU — no CPU sort / fancy-index / PCIe hitch
-            pts = torch.from_numpy(np.ascontiguousarray(points[:, :4])).to(self.device)
+            # Async H2D from a pinned buffer: submitting the copy does not block
+            # the CPU; only the final .cpu() below synchronizes with the GPU stream.
+            pin = self._pin_buffer(points.shape[0])
+            pin_view = pin[: points.shape[0]]
+            np.copyto(pin_view, points[:, :4])
+            pts = torch.from_numpy(pin_view).to(self.device, non_blocking=True)
             row, col, r = project_points_gpu(pts, h=self.h, w=self.w,
                                              fov_top_deg=self.fov_top_deg,
                                              fov_bottom_deg=self.fov_bottom_deg)
@@ -95,21 +115,22 @@ class Segmenter:
                                    max_range=self.max_range)
             ri = torch.from_numpy(np.ascontiguousarray(ri))
             proj_t = torch.from_numpy(proj).long().unsqueeze(0)
-        ri_t = ri.unsqueeze(0)
         t1 = time.perf_counter()
         t["project"] = (t1 - t0) * 1000.0
 
         with torch.amp.autocast("cuda", enabled=(self.device.type == "cuda" and self.precision == "fp16")):
-            logits = self.model(ri_t)
+            logits = self.model(ri.unsqueeze(0))
             probs = torch.softmax(logits.float(), dim=1)
             # 3x3 neighbour gather -> per-point probabilities (knn_project_back)
             point_probs = self._knn_probs(probs, proj_t, 3)
-
         t2 = time.perf_counter()
         t["forward"] = (t2 - t1) * 1000.0
 
-        per_point = torch.argmax(point_probs, dim=1).to(torch.uint8).cpu().numpy()
-        t["total"] = (t2 - t0) * 1000.0
+        # Fold argmax -> uint8 in one op, then a single device->host sync copy.
+        per_point = torch.argmax(point_probs, dim=1, keepdim=False).to(torch.uint8).cpu().numpy()
+        t3 = time.perf_counter()
+        t["sync"] = (t3 - t2) * 1000.0
+        t["total"] = (t3 - t0) * 1000.0
         return per_point, t
 
     @staticmethod
