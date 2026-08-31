@@ -95,17 +95,15 @@ def inject(readme_path, results_dir):
     with open(json_path, encoding="utf-8") as f:
         data = json.load(f)
 
-    table_md = format_results(data)
-
     readme_text = readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
 
     if MARKER_START in readme_text and MARKER_END in readme_text:
-        before = readme_text.split(MARKER_START)[0]
-        after = readme_text.split(MARKER_END)[1]
-        new_text = f"{before}{MARKER_START}{table_md}\n{MARKER_END}{after}"
-    else:
-        new_text = f"{readme_text}\n{MARKER_START}{table_md}\n{MARKER_END}\n"
+        print(f"Markers already present in {readme_path} — skipping (hand-curated Results section).")
+        print(f"  Reference: {json_path.name}")
+        return
 
+    table_md = format_results(data)
+    new_text = f"{readme_text}\n{MARKER_START}{table_md}\n{MARKER_END}\n"
     readme_path.write_text(new_text, encoding="utf-8")
     print(f"Injected {json_path.name} into {readme_path}")
 

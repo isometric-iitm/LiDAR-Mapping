@@ -1,63 +1,63 @@
 # Evaluation Summary
 
-- **Timestamp**: 2026-08-29T23:40:41.677077+00:00
+- **Timestamp**: 2026-08-31T15:45:16.585816+00:00
 - **Device**: cuda | **Precision**: fp16
 
 ## Pixel-Level
 
-- **Samples**: 50
-- **mIoU (5-class)**: 0.6843
-- **mIoU (4-class)**: 0.8467
+- **Samples**: 4071
+- **mIoU (5-class)**: 0.6779
+- **mIoU (4-class)**: 0.8092
 
 ### Per-Class IoU (4-class)
 
 | Class | IoU |
 |-------|-----|
-| drivable | 0.9000 |
-| terrain_nondrivable | 0.8864 |
-| static_obstacle | 0.7012 |
-| dynamic_object | 0.8993 |
+| drivable | 0.8458 |
+| terrain_nondrivable | 0.8539 |
+| static_obstacle | 0.6847 |
+| dynamic_object | 0.8523 |
 
 ### Per-Distance-Band mIoU (4-class)
 
 | Band | mIoU |
 |------|------|
-| 0-5m | 0.8092 |
-| 5-10m | 0.8529 |
-| 10-20m | 0.8384 |
-| 20-40m | 0.7219 |
-| 40-80m | 0.5818 |
+| 0-5m | 0.8065 |
+| 5-10m | 0.8269 |
+| 10-20m | 0.7916 |
+| 20-40m | 0.6864 |
+| 40-80m | 0.5573 |
 
-### Latency: 1108.3 +/- 7661.8 ms/batch
+### Latency: 10.1 +/- 69.9 ms/batch
 
 ## Point-Level
 
-- **Scans**: 50
-- **mIoU (5-class)**: 0.5256
-- **mIoU (4-class)**: 0.6533
+- **Scans**: 4071
+- **mIoU (5-class)**: 0.6326
+- **mIoU (4-class)**: 0.7577
 
 ### Per-Class IoU (4-class)
 
 | Class | IoU |
 |-------|-----|
-| drivable | 0.8904 |
-| terrain_nondrivable | 0.8568 |
-| static_obstacle | 0.4641 |
-| dynamic_object | 0.4020 |
+| drivable | 0.8113 |
+| terrain_nondrivable | 0.8242 |
+| static_obstacle | 0.6565 |
+| dynamic_object | 0.7389 |
 
 ### Per-Distance-Band mIoU (4-class)
 
 | Band | mIoU |
 |------|------|
-| 0-5m | 0.6686 |
-| 5-10m | 0.6160 |
-| 10-20m | 0.6325 |
-| 20-40m | 0.5661 |
-| 40-80m | 0.4795 |
+| 0-5m | 0.7467 |
+| 5-10m | 0.7766 |
+| 10-20m | 0.7465 |
+| 20-40m | 0.6282 |
+| 40-80m | 0.5035 |
 
-### Latency: 24.9 +/- 36.2 ms/scan
+### Latency: 54.0 +/- 14.9 ms/scan
 
 ## Memory
 
-- **Peak RSS**: 5876.7 MB
+- **Peak RSS**: 5876.8 MB
 - **GPU Peak**: 323.5 MB

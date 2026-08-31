@@ -198,8 +198,15 @@ export default function MetricsPanel({
             ))}
           </div>
           <div className="hud-rail mt-2 flex items-center justify-between">
-            <span className="hud-label">Dropped</span>
-            <span className="hud-val">{stats?.frames_dropped ?? 0}</span>
+            <span className="hud-label">Dropped frames</span>
+            <span className="hud-val">
+              {stats?.frames_dropped ?? 0}
+              {(stats?.frames_dropped ?? 0) > 0 && (stats?.frames_emitted ?? 0) > 0 && (
+                <span className="text-zinc-500 ml-1">
+                  ({((stats!.frames_dropped! / (stats!.frames_emitted! + stats!.frames_dropped!)) * 100).toFixed(1)}%)
+                </span>
+              )}
+            </span>
           </div>
         </section>
 

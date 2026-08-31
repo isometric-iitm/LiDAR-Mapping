@@ -3,7 +3,7 @@
 [![Python 3.14](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org/)
 [![PyTorch 2.11](https://img.shields.io/badge/PyTorch-2.11-ee4c2c.svg)](https://pytorch.org/)
 [![Next.js 16](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org/)
-[![Tests 102 passing](https://img.shields.io/badge/tests-102%20passing-brightgreen.svg)](#testing)
+[![Tests 110 passing](https://img.shields.io/badge/tests-110%20passing-brightgreen.svg)](#testing)
 
 Real-time semantic segmentation of LiDAR point clouds projected onto a **variable-resolution log-polar 2.5D grid**, streamed over binary WebSocket to an interactive 3D dashboard. Built on SemanticKITTI, powered by a range-image UNet.
 
@@ -11,51 +11,68 @@ Real-time semantic segmentation of LiDAR point clouds projected onto a **variabl
 
 ---
 
+<!-- RESULTS_START -->
 ## Results
 
 ### Pixel-level segmentation
 
 | | GPU (RTX 3060 Ti, fp16) | CPU (i5-11400F, fp32) |
 |---|:---:|:---:|
-| **mIoU 4-class** | **84.7%** | **82.6%** |
-| **mIoU 5-class** | 68.4% | 66.6% |
-| Latency | ~9 ms/batch | ~442 ms/batch |
-| Throughput | ~110 Hz | ~2.3 Hz |
+| **mIoU 4-class** | **80.9%** | **82.6%** |
+| **mIoU 5-class** | 67.8% | 66.6% |
+| Latency | ~10 ms/batch | ~442 ms/batch |
+| Throughput | ~100 Hz | ~2.3 Hz |
 
 ### Point-level segmentation
 
 | | GPU (RTX 3060 Ti, fp16) | CPU (i5-11400F, fp32) |
 |---|:---:|:---:|
-| **mIoU 4-class** | **65.3%** | **65.3%** |
-| **mIoU 5-class** | 52.6% | 52.6% |
-| Latency | ~25 ms/scan | ~243 ms/scan |
-| Throughput | ~40 Hz | ~4.1 Hz |
+| **mIoU 4-class** | **75.8%** | **65.3%** |
+| **mIoU 5-class** | 63.3% | 52.6% |
+| Latency | ~54 ms/scan | ~243 ms/scan |
+| Throughput | ~19 Hz | ~4.1 Hz |
 
 ### Per-class IoU (4-class, GPU)
 
 | Class | Pixel | Point |
 |-------|:-----:|:-----:|
-| Drivable | 90.0% | 89.0% |
-| Terrain / Non-drivable | 88.6% | 85.7% |
-| Static Obstacle | 70.1% | 46.4% |
-| Dynamic Object | 89.9% | 40.2% |
+| Drivable | 84.6% | 81.1% |
+| Terrain / Non-drivable | 85.4% | 82.4% |
+| Static Obstacle | 68.5% | 65.7% |
+| Dynamic Object | 85.2% | 73.9% |
 
 ### Per-distance-band mIoU (4-class, GPU pixel-level)
 
 | Band | mIoU | Note |
 |------|:----:|------|
-| 0-5 m | 80.9% | Near-field - 5 cm cells |
-| 5-10 m | 85.3% | |
-| 10-20 m | 83.8% | |
-| 20-40 m | 72.2% | |
-| 40-80 m | 58.2% | Far-field - ~50 cm cells |
+| 0-5 m | 80.7% | Near-field - 5 cm cells |
+| 5-10 m | 82.7% | |
+| 10-20 m | 79.2% | |
+| 20-40 m | 68.6% | |
+| 40-80 m | 55.7% | Far-field - ~50 cm cells |
 
 <details>
-<summary>Evaluation plots</summary>
+<summary>Per-distance-band mIoU tables (4-class &amp; 5-class)</summary>
 
-![Per-class IoU](results/per_class_iou.png)
+**4-class**
 
-![Per-distance-band mIoU](results/per_distance_band.png)
+| Band | Pixel | Point |
+|------|:-----:|:-----:|
+| 0-5 m | 80.7% | 74.7% |
+| 5-10 m | 82.7% | 77.7% |
+| 10-20 m | 79.2% | 74.6% |
+| 20-40 m | 68.6% | 62.8% |
+| 40-80 m | 55.7% | 50.3% |
+
+**5-class**
+
+| Band | Pixel | Point |
+|------|:-----:|:-----:|
+| 0-5 m | 72.0% | 61.8% |
+| 5-10 m | 70.3% | 62.4% |
+| 10-20 m | 65.7% | 56.1% |
+| 20-40 m | 56.3% | 44.3% |
+| 40-80 m | 38.4% | 31.7% |
 
 ![Confusion matrices](results/confusion_matrices.png)
 
@@ -67,6 +84,8 @@ Real-time semantic segmentation of LiDAR point clouds projected onto a **variabl
 |-----------|-----------|------------|--------|
 | Uniform 5 cm | 0.05 m × 0.05 m | ~16 million | ~784 MB |
 | **Log-polar (ours)** | 5 cm → 50 cm | ~369K | **~17 MB** |
+
+<!-- RESULTS_END -->
 
 ### Test hardware
 
@@ -164,7 +183,8 @@ flowchart LR
 | Range image | Scatter into 5×64×2048 tensor | `build_range_image_gpu` (nearest-wins dedup) | `build_range_image` (far-wins overwrite) |
 | Segmentation | UNet forward pass | fp16 autocast + `torch.compile` | fp32, no compile |
 | Back-projection | Pixel logits → per-point probs | `_knn_probs` (3×3 gather) | same (tensor ops) |
-| Grid update | Per-point labels → 2.5D cells | numpy vectorized `reduceat` + `bincount` | same |
+| Grid update | Per-cell reduce + class majority | numba JIT fused kernel (`jit_reduce`), fallback to numpy `reduceat`+`bincount` | same |
+| Pipeline | Thread orchestration | Two-stage (SEG thread → GRID thread), hides GPU `.cpu()` sync behind CPU grid work | `stages: single` fallback |
 | Streaming | Grid cells → binary frames | `ws_protocol` (44-byte header, 28-byte rows) | same |
 
 ---
@@ -191,10 +211,11 @@ pc2d/
 │   │   ├── lovasz.py         # CombinedLoss (CE + Lovasz-Softmax)
 │   │   └── predict.py        # Segmenter (end-to-end: project → forward → KNN)
 │   ├── grid_engine/
-│   │   └── logpolar_grid.py  # LogPolarGrid (~369K cells, ~17 MB, decay, delta)
+│   │   ├── logpolar_grid.py  # LogPolarGrid (~369K cells, ~17 MB, decay, delta, JIT-accelerated reduce)
+│   │   └── jit_reduce.py     # numba fused per-cell scatter-reduce (min/max/sum/count/class)
 │   └── server/
-│       ├── app.py            # FastAPI + Pipeline thread + WS endpoints
-│       └── ws_protocol.py    # Binary framing (magic 0x50433244)
+│       ├── app.py            # FastAPI + two-stage Pipeline (SEG thread + GRID thread) + WS endpoints
+│       └── ws_protocol.py   # Binary framing (magic 0x50433244, v2)
 ├── eval/
 │   ├── run_evaluation.py     # pixel + point mIoU, per-distance-band, latency
 │   └── inject_results.py     # auto-inject eval results into this README
@@ -203,7 +224,7 @@ pc2d/
 │   ├── preprocess_to_shards.py  # raw .bin → tar shards (ri + li)
 │   ├── download_checkpoint.py# fetch best_miou.pt from GitHub Release
 │   └── export_onnx.py        # export UNet to ONNX (opset 17)
-├── tests/                    # 96 tests (see Testing section)
+├── tests/                    # 110 tests (see Testing section)
 ├── results/                  # eval outputs (JSON, PNG, MD)
 ├── checkpoints/              # best_miou.pt (gitignored), history.jsonl
 ├── dashboard/                # Next.js 16 real-time dashboard (see dashboard/README.md)
@@ -375,7 +396,7 @@ Real-time data uses a compact binary framing protocol (40-100× smaller than JSO
 |-------|------|-------------|
 | `magic` | uint32 | `0x50433244` ("PC2D") |
 | `code` | uint16 | 1=snapshot, 2=delta, 3=cloud |
-| `version` | uint16 | 1 |
+| `version` | uint16 | 2 |
 | `frame` | uint64 | Grid frame counter |
 | `epoch` | uint64 | Bumped on seek (stale-frame filter) |
 | `n_a` | int32 | Active/updated rows |
@@ -402,7 +423,7 @@ Large frames split at 8,000 cells / 30,000 cloud points. The epoch field lets th
 uv run pytest
 ```
 
-102 tests across 10 files, zero dependency on external data paths:
+110 tests across 11 files, zero dependency on external data paths:
 
 | Test file | Tests | Coverage |
 |-----------|-------|----------|
@@ -411,6 +432,7 @@ uv run pytest
 | `test_label_mapping.py` | 8 | remap_labels, bin_5_to_4, compute_class_weights |
 | `test_grid_update.py` | 5 | Occupancy decay, snapshot/delta invariants, reset |
 | `test_ws_protocol.py` | 4 | Binary header magic/codes, 32-byte row layout (v2) |
+| `test_jit_reduce.py` | 4 | numba fused reduce vs numpy equivalence, single-point/segment/class tallies |
 | `test_segmenter_cpu.py` | 3 | Empty scan, synthetic scan, CPU device |
 | `test_e2e_replay.py` | 5 | Replayer seek, pipeline seek-reset + epoch guard |
 | `test_evaluation.py` | 25 | Eval helpers, path resolution, synthetic pixel eval, plots, inject |
@@ -427,7 +449,7 @@ Model weights are **not committed to git** (149 MB binary). Instead they're deli
 uv run python scripts/download_checkpoint.py
 ```
 
-This fetches `best_miou.pt` from [v1.0.0](https://github.com/isometric-iitm/LiDAR-Mapping/releases/tag/v1.0.0) (149 MB, mIoU 84.7% 4-class pixel-level on val set). See `checkpoints/README.md` for publishing newer checkpoints.
+This fetches `best_miou.pt` from [v1.0.0](https://github.com/isometric-iitm/LiDAR-Mapping/releases/tag/v1.0.0) (149 MB, mIoU 80.9% 4-class pixel-level on full val set). See `checkpoints/README.md` for publishing newer checkpoints.
 
 ---
 

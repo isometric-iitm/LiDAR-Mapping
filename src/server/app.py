@@ -20,7 +20,11 @@ from src.server import ws_protocol
 
 
 class Pipeline:
-    """Background thread: replayer -> segmenter -> grid. Produces WS message dicts."""
+    """Two-stage streaming pipeline: SEG thread (GPU segmenter) runs ahead of the
+    GRID thread (CPU grid update + pack/emit), hiding the GPU's device→host sync
+    behind the previous frame's grid work. A single-slot mailbox preserves strict
+    frame ordering with at most 1 frame of look-ahead. Falls back to a serial
+    single-thread path when ``pipeline.stages: single`` is set in config."""
 
     def __init__(self, cfg: dict):
         from src.common.config import resolve_path
@@ -72,7 +76,7 @@ class Pipeline:
         self._perf_sum = {"seg": 0.0, "grid": 0.0, "pack": 0.0, "proc": 0.0}
         self.cloud_on = False
         self.cloud_max = int(self.cfg["server"].get("cloud_points_max", 30000))
-        self._snap_iv = int(self.cfg["server"].get("snapshot_interval_frames", 20))
+        self._snap_iv = int(self.cfg["server"].get("snapshot_interval_frames", 5))
         self._stats_iv = int(self.cfg["server"].get("stats_interval_frames", 10))
         self._wire_compress = bool(self.cfg["server"].get("wire_compress", False))
 

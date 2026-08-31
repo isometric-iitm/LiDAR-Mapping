@@ -17,7 +17,7 @@ Real-time 3D semantic map viewer and training curves for the PC2D LiDAR mapping 
 
 ## Features
 
-- **2.5D log-polar grid** - ~720K cells rendered as instanced boxes, incrementally updated via delta patches (only changed cells re-computed)
+- **2.5D log-polar grid** - ~369K cells rendered as instanced boxes, incrementally updated via delta patches (only changed cells re-computed)
 - **Segmented point cloud** - class-colored per-point overlay from the UNet's KNN back-projection
 - **Raw point cloud comparison** - height-gradient colored overlay for side-by-side inspection
 - **Compare mode** - segmented and raw clouds overlaid simultaneously
@@ -28,7 +28,7 @@ Real-time 3D semantic map viewer and training curves for the PC2D LiDAR mapping 
 - **Training curves** - mIoU (4-class, 5-class), validation loss, per-class IoU over training steps
 - **Evaluation** - pixel + point level mIoU, per-class IoU, per-distance-band mIoU, latency, memory
 - **Iconoir icons** - Play/Pause, compass (north-up), and page navigation use the [Iconoir](https://iconoir.com/) icon set
-- **~7,200× memory compression** visualization in the sidebar
+- **~43× memory compression** visualization in the sidebar
 
 ---
 
@@ -87,7 +87,7 @@ flowchart TB
 | Type | Format | When |
 |------|--------|------|
 | `grid_meta` | JSON | Once on connect (ring geometry, class colors) |
-| Snapshot | Binary (code=1) | Every 20 frames - full rendered cell list |
+| Snapshot | Binary (code=1) | Every 5 frames - full rendered cell list |
 | Delta | Binary (code=2) | Every other frame - only changed + freed cells |
 | Cloud | Binary (code=3) | When cloud stream is on - xyz + cls arrays |
 | `stats` | JSON | Every 2 frames - FPS, latency, memory |

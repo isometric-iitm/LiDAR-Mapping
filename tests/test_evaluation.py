@@ -271,7 +271,7 @@ def test_inject_results(tmp_path):
     assert "0.6000" in readme_text
 
 
-def test_inject_results_updates_existing(tmp_path):
+def test_inject_results_skips_existing_markers(tmp_path):
     from eval.inject_results import inject, MARKER_START, MARKER_END
 
     results_dir = tmp_path / "results"
@@ -303,5 +303,5 @@ def test_inject_results_updates_existing(tmp_path):
     inject(readme_path, results_dir)
 
     readme_text = readme_path.read_text(encoding="utf-8")
-    assert "0.8000" in readme_text
-    assert "old content" not in readme_text
+    assert "old content" in readme_text
+    assert "0.8000" not in readme_text
