@@ -3,7 +3,7 @@
 :root {
   --background: #000000;
   --foreground: #ededed;
-  --radius: 5px;
+  --radius: 4px;
 
   /* HUD accent */
   --hud-cyan: #22d3ee;
@@ -31,9 +31,9 @@ body {
   font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
 }
 
-/* ─────────────────────────────────────────────────────────────
-   HUD DESIGN SYSTEM (global — no per-element arbitrary values)
-   ───────────────────────────────────────────────────────────── */
+/* -------------------------------------------------------------------------
+   HUD DESIGN SYSTEM (global - no per-element arbitrary values)
+   ------------------------------------------------------------------------- */
 
 /* Frosted-glass panel: strong blur + translucency + hairline */
 .frost {
@@ -42,10 +42,9 @@ body {
   -webkit-backdrop-filter: blur(18px) saturate(1.4);
   border: 1px solid var(--hairline);
   border-radius: var(--radius);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
 }
 
-/* Primary readout — big tabular mono numeral */
+/* Primary readout - big tabular mono numeral */
 .hud-num {
   font-family: var(--font-jetbrains-mono), ui-monospace, monospace;
   font-variant-numeric: tabular-nums;

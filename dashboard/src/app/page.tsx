@@ -6,6 +6,7 @@ import * as THREE from "three";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, OrthographicCamera, PerspectiveCamera } from "@react-three/drei";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
+import { Compass } from "iconoir-react";
 import MetricsPanel, { type ViewMode } from "@/components/MetricsPanel";
 import Timeline from "@/components/Timeline";
 import { CLASSES } from "@/lib/colors";
@@ -299,7 +300,7 @@ export default function Home() {
             )}
           </Canvas>
 
-          {/* ── HUD top chrome: legend (left) · camera controls (right) ───── */}
+          {/* -- HUD top chrome: legend (left) / camera controls (right) --- */}
           <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-3">
             <div className="frost pointer-events-none px-3 py-2">
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -331,15 +332,16 @@ export default function Home() {
               <div className="mx-0.5 h-4 w-px bg-white/15" />
               <button
                 onClick={resetNorth}
-                className="rounded-[2.5px] px-2.5 py-1 text-xs font-medium text-zinc-400 transition-colors hover:bg-white/10 hover:text-zinc-200"
+                className="flex items-center gap-1 rounded-[2.5px] px-2.5 py-1 text-xs font-medium text-zinc-400 transition-colors hover:bg-white/10 hover:text-zinc-200"
                 title="Reset to north-up"
               >
-                N↑
+                <Compass width={14} height={14} strokeWidth={2} />
+                North
               </button>
             </div>
           </div>
 
-          {/* ── bottom-left: current mode + grid size ─────────────────── */}
+          {/* -- bottom-left: current mode + grid size ------------------ */}
           <div className="frost pointer-events-none absolute bottom-4 left-4 px-4 py-2 text-xs text-zinc-400">
             <span className="font-semibold text-zinc-200">
               {viewMode === "grid"

@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { Pause, Play, Refresh } from "iconoir-react";
 
 type SeqInfo = { id: string; frames: number; has_poses: boolean; has_labels: boolean };
 
@@ -57,23 +58,15 @@ export default function Timeline({ seqPos, seqLen, paused, speed, seeking, seqId
       <button
         onClick={() => onPause(!paused)}
         disabled={seeking}
-        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-800 text-zinc-200 transition-colors hover:bg-zinc-700 disabled:cursor-wait disabled:opacity-60"
-        title={seeking ? "Loading…" : paused ? "Resume playback" : "Freeze playback"}
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[4px] bg-zinc-800 text-zinc-200 transition-colors hover:bg-zinc-700 disabled:cursor-wait disabled:opacity-60"
+        title={seeking ? "Loading..." : paused ? "Resume playback" : "Freeze playback"}
       >
         {seeking ? (
-          <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden>
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
-          </svg>
+          <Refresh className="h-4 w-4 animate-spin" strokeWidth={2} />
         ) : paused ? (
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
-            <path d="M2.5 1.6c0-.6.7-1 1.2-.7l6.8 4.4c.5.3.5 1 0 1.3L3.7 11c-.5.3-1.2-.1-1.2-.7V1.6z" />
-          </svg>
+          <Play className="h-4 w-4" strokeWidth={2} />
         ) : (
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden>
-            <rect x="2" y="2" width="3" height="8" rx="1" />
-            <rect x="7" y="2" width="3" height="8" rx="1" />
-          </svg>
+          <Pause className="h-4 w-4" strokeWidth={2} />
         )}
       </button>
 
@@ -115,22 +108,22 @@ export default function Timeline({ seqPos, seqLen, paused, speed, seeking, seqId
           />
         )}
         <div
-          className="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full bg-emerald-400 shadow shadow-emerald-900/60"
+          className="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full bg-emerald-400"
           style={{ left: `${shown * 100}%` }}
         />
       </div>
 
       <div className="shrink-0 font-mono text-zinc-400">
-        {seeking ? "…" : `${fmt(shownPos / 10)} / ${fmt(totalSec)}`}
+        {seeking ? "..." : `${fmt(shownPos / 10)} / ${fmt(totalSec)}`}
       </div>
       <div className="hidden shrink-0 font-mono text-zinc-500 sm:block">
-        {seeking ? "loading" : `${shownPos.toLocaleString()} / ${seqLen.toLocaleString()}`}
+        {seeking ? "..." : `${shownPos.toLocaleString()} / ${seqLen.toLocaleString()}`}
       </div>
       <select
         value={seqId}
         onChange={(e) => onSwitchSeq(e.target.value)}
         disabled={seeking}
-        className="shrink-0 rounded-lg bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-300 outline-none transition-colors hover:bg-zinc-700 focus:ring-1 focus:ring-zinc-500 disabled:cursor-wait disabled:opacity-60"
+        className="shrink-0 rounded-[4px] bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-300 outline-none transition-colors hover:bg-zinc-700 focus:ring-1 focus:ring-zinc-500 disabled:cursor-wait disabled:opacity-60"
         title="Sequence"
       >
         {availableSeqs.map((s) => (
@@ -142,7 +135,7 @@ export default function Timeline({ seqPos, seqLen, paused, speed, seeking, seqId
       <select
         value={speed}
         onChange={(e) => onSpeed(Number(e.target.value))}
-        className="shrink-0 rounded-lg bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-300 outline-none transition-colors hover:bg-zinc-700 focus:ring-1 focus:ring-zinc-500"
+        className="shrink-0 rounded-[4px] bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-300 outline-none transition-colors hover:bg-zinc-700 focus:ring-1 focus:ring-zinc-500"
         title="Playback speed"
       >
         {SPEEDS.map((s) => (

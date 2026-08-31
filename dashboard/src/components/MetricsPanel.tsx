@@ -1,10 +1,11 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import type { Stats } from "@/lib/types";
 
 function fmt(n: number | undefined, digits = 1) {
-  return typeof n === "number" && isFinite(n) ? n.toFixed(digits) : "–";
+  return typeof n === "number" && isFinite(n) ? n.toFixed(digits) : "-";
 }
 
 /** Format a byte count into the largest prefix that reads cleanly (B/KB/MB/GB). */
@@ -133,7 +134,7 @@ export default function MetricsPanel({
   const gridLabel = fmtSizeKB(kb);
   const uniformLabel = fmtBytes(mb * 1e6);
   // Actual over-the-wire payload per frame: each rendered cell is a 32-byte row.
-  const wireLabel = renderedCells > 0 ? fmtBytes(renderedCells * 32) : "–";
+  const wireLabel = renderedCells > 0 ? fmtBytes(renderedCells * 32) : "-";
 
   const perStage = [
     { k: "Seg", ms: stats?.seg_ms },
@@ -148,7 +149,7 @@ export default function MetricsPanel({
 
   return (
     <aside className="flex w-full max-w-xs shrink-0 flex-col border-l border-white/10 bg-black/40 backdrop-blur-xl">
-      {/* ── readout header ───────────────────────────────────────── */}
+      {/* -- readout header ------------------------------------------- */}
       <div className="border-b border-white/10 px-4 pb-3 pt-5">
         <div className="grid grid-cols-3 gap-2">
           <div>
@@ -176,7 +177,7 @@ export default function MetricsPanel({
         </section>
 
         <section className="mt-6">
-          <h3 className="hud-sec mb-2">Pipeline · ms</h3>
+          <h3 className="hud-sec mb-2">Pipeline / ms</h3>
           <div className="hud-rail space-y-2">
             {perStage.map((s) => (
               <div key={s.k} className="flex items-center gap-2">
@@ -223,7 +224,7 @@ export default function MetricsPanel({
               <button
                 key={v.id}
                 onClick={() => onViewMode(v.id)}
-                className={`rounded-lg px-2 py-1.5 text-left transition-colors ${
+                className={`rounded-[4px] px-2 py-1.5 text-left transition-colors ${
                   viewMode === v.id
                     ? "bg-cyan-500/15 ring-1 ring-cyan-400/40"
                     : "bg-white/5 hover:bg-white/10"
@@ -234,9 +235,27 @@ export default function MetricsPanel({
             ))}
           </div>
         </section>
+
+        <section className="mt-6">
+          <h3 className="hud-sec mb-2">Pages</h3>
+          <div className="flex flex-col">
+            <Link
+              href="/training"
+              className="py-1 text-sm text-zinc-400 transition-colors hover:text-zinc-100"
+            >
+              Training
+            </Link>
+            <Link
+              href="/eval"
+              className="py-1 text-sm text-zinc-400 transition-colors hover:text-zinc-100"
+            >
+              Evaluation
+            </Link>
+          </div>
+        </section>
       </div>
 
-      {/* ── cell under cursor (always open, dashes when empty) ────── */}
+      {/* -- cell under cursor (always open, dashes when empty) ------ */}
       <div className="frost mx-3 mb-3 shrink-0 px-4 py-3">
         <h3 className="hud-sec mb-2">Cell under cursor</h3>
         <div className="grid grid-cols-3 gap-x-3 gap-y-2">
@@ -245,17 +264,17 @@ export default function MetricsPanel({
               className="mr-2 inline-block h-2.5 w-2.5 rounded-full align-middle"
               style={{ background: hover ? hover.clsColor : "#3f3f46" }}
             />
-            <span className="text-sm font-medium text-zinc-100">{hover ? hover.cls : "—"}</span>
+            <span className="text-sm font-medium text-zinc-100">{hover ? hover.cls : "-"}</span>
             <span className="hud-val ml-2">
-              {hover ? `${hover.r.toFixed(1)} m · ${hover.deg.toFixed(1)}°` : "—"}
+              {hover ? `${hover.r.toFixed(1)} m / ${hover.deg.toFixed(1)}°` : "-"}
             </span>
           </div>
-          <CellStat k="H max" v={hover ? `${hover.zMax.toFixed(2)}m` : "—"} />
-          <CellStat k="Mean z" v={hover ? `${hover.zMean.toFixed(2)}m` : "—"} />
-          <CellStat k="Width" v={hover ? hover.cellWidth : "—"} />
-          <CellStat k="Occ" v={hover ? `${(hover.occ * 100).toFixed(0)}%` : "—"} />
-          <CellStat k="Dyn" v={hover ? `${(hover.dyn * 100).toFixed(0)}%` : "—"} />
-          <CellStat k="Trav" v={hover ? `${(hover.trav * 100).toFixed(0)}%` : "—"} />
+          <CellStat k="H max" v={hover ? `${hover.zMax.toFixed(2)}m` : "-"} />
+          <CellStat k="Mean z" v={hover ? `${hover.zMean.toFixed(2)}m` : "-"} />
+          <CellStat k="Width" v={hover ? hover.cellWidth : "-"} />
+          <CellStat k="Occ" v={hover ? `${(hover.occ * 100).toFixed(0)}%` : "-"} />
+          <CellStat k="Dyn" v={hover ? `${(hover.dyn * 100).toFixed(0)}%` : "-"} />
+          <CellStat k="Trav" v={hover ? `${(hover.trav * 100).toFixed(0)}%` : "-"} />
         </div>
       </div>
     </aside>

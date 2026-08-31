@@ -159,7 +159,7 @@ function InstancedCells({
       const key = `${i}:${j}`;
       const prevSlot = c.slotOf.get(key);
       const prev = prevSlot !== undefined ? c.geo[prevSlot] : null;
-      // Dirty-skip on sensor truth only (no trav/dyn cache) — keeps per-frame
+      // Dirty-skip on sensor truth only (no trav/dyn cache) - keeps per-frame
       // accuracy (instant free every scan) but avoids re-pushing unchanged cells.
       if (prev && prev.zMax === zMax && prev.zMean === zMean && prev.occ === occ && prev.cls === cls) {
         return false;

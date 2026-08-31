@@ -7,10 +7,7 @@
 
 Real-time semantic segmentation of LiDAR point clouds projected onto a **variable-resolution log-polar 2.5D grid**, streamed over binary WebSocket to an interactive 3D dashboard. Built on SemanticKITTI, powered by a range-image UNet.
 
-<!-- TODO: Add hero screenshot/GIF -->
-<!--
-![PC2D Dashboard](docs/assets/dashboard_hero.png)
--->
+![PC2D Dashboard Demo](docs/assets/dashboard.gif)
 
 ---
 
@@ -47,11 +44,11 @@ Real-time semantic segmentation of LiDAR point clouds projected onto a **variabl
 
 | Band | mIoU | Note |
 |------|:----:|------|
-| 0–5 m | 80.9% | Near-field — 5 cm cells |
-| 5–10 m | 85.3% | |
-| 10–20 m | 83.8% | |
-| 20–40 m | 72.2% | |
-| 40–80 m | 58.2% | Far-field — ~50 cm cells |
+| 0-5 m | 80.9% | Near-field - 5 cm cells |
+| 5-10 m | 85.3% | |
+| 10-20 m | 83.8% | |
+| 20-40 m | 72.2% | |
+| 40-80 m | 58.2% | Far-field - ~50 cm cells |
 
 <details>
 <summary>Evaluation plots</summary>
@@ -76,7 +73,7 @@ Real-time semantic segmentation of LiDAR point clouds projected onto a **variabl
 | | GPU Bench | CPU Bench |
 |---|---|---|
 | **CPU** | Intel i5-11400F @ 2.60 GHz | Same |
-| **GPU** | NVIDIA RTX 3060 Ti (8 GB VRAM) | — |
+| **GPU** | NVIDIA RTX 3060 Ti (8 GB VRAM) | - |
 | **RAM** | 16 GB DDR4 | Same |
 | **OS** | Windows 11 | Same |
 | **Python** | 3.14 | Same |
@@ -99,14 +96,22 @@ uv run python scripts/download_checkpoint.py
 cp .env.example .env
 # Edit .env: PC2D_SEQ_DIR=F:/sih/dataset/sequences/08
 
-# 4. Launch the demo (backend + dashboard)
-uv run python scripts/run_live_demo.py
+# 4. Launch the backend (Terminal 1)
+uv run python -m uvicorn src.server.app:create_app --factory --host 127.0.0.1 --port 8000
 
-# CPU-only (no GPU required)
-uv run python scripts/run_live_demo.py --cpu
+# 5. Launch the dashboard (Terminal 2)
+cd dashboard
+npm run dev
 ```
 
-Open **http://localhost:3000** for the real-time dashboard.
+Open **http://localhost:3000** for the real-time dashboard (Training: **/training**, Evaluation: **/eval**). API docs are at **http://127.0.0.1:8000/docs**.
+
+**No GPU?** Force CPU inference in the backend terminal before starting it:
+```powershell
+# PowerShell
+$env:PC2D_DEVICE="cpu"; $env:PC2D_PRECISION="fp32"; $env:PC2D_PLAYBACK_SPEED="0.5"
+```
+Then run the backend `uvicorn` command from step 4.
 
 ---
 
@@ -196,7 +201,6 @@ pc2d/
 ├── scripts/
 │   ├── train.py              # train the UNet on precomputed shards
 │   ├── preprocess_to_shards.py  # raw .bin → tar shards (ri + li)
-│   ├── run_live_demo.py      # launch backend + dashboard
 │   ├── download_checkpoint.py# fetch best_miou.pt from GitHub Release
 │   └── export_onnx.py        # export UNet to ONNX (opset 17)
 ├── tests/                    # 96 tests (see Testing section)
@@ -221,7 +225,7 @@ The core innovation: ring width grows geometrically from **5 cm (near)** to **~5
 | `r_min` | 0.5 m | Inner dead zone |
 | `r_max` | 100 m | Outer cutoff |
 | `n_theta` | 720 | Angular sectors (0.5° each) |
-| Resulting rings | ~1,000 | dr_0 · α^i reaches r_max at i≈997 |
+| Resulting rings | ~1,000 | dr_0 * α^i reaches r_max at i≈997 |
 | Resulting cells | ~720K | rings × sectors |
 
 ### Temporal dynamics
@@ -230,10 +234,10 @@ The core innovation: ring width grows geometrically from **5 cm (near)** to **~5
 |---------|-----------|-----------|
 | Occupancy decay | `occ *= exp(-dt / tau_free)` | `tau_free = 1.5 s` |
 | Occupancy gain | `occ += (1 - occ) * gain` on hit | `gain = 0.3` |
-| Rendered threshold | `occ > 0.2` | — |
+| Rendered threshold | `occ > 0.2` | - |
 | Dynamic detection | free→occupied flip boosts `dyn_score` | `dyn_change_boost = 0.2` |
-| Dynamic threshold | `dyn_score > 0.5` | — |
-| Ground reference | 20th percentile of z in 1.5–15 m | auto-tracked per frame |
+| Dynamic threshold | `dyn_score > 0.5` | - |
+| Ground reference | 20th percentile of z in 1.5-15 m | auto-tracked per frame |
 
 ---
 
@@ -244,9 +248,9 @@ flowchart LR
     subgraph Raw["SemanticKITTI (34 classes)"]
         R0["road, parking, sidewalk"]
         R1["terrain, vegetation"]
-        R2["building, fence, pole…"]
-        R3["car, truck, bus…"]
-        R4["pedestrian, rider…"]
+        R2["building, fence, pole..."]
+        R3["car, truck, bus..."]
+        R4["pedestrian, rider..."]
         RX["(unmapped)"]
     end
 
@@ -310,7 +314,7 @@ All optional. Unset vars fall back to relative defaults in YAML, resolved agains
 
 | Device | Precision | Behavior |
 |--------|-----------|----------|
-| `auto` | — | Resolves to CUDA if available, else CPU |
+| `auto` | - | Resolves to CUDA if available, else CPU |
 | `cuda` | `fp16` | Model `.half()`, AMP autocast, `torch.compile`, GradScaler |
 | `cuda` | `fp32` | Full precision, no AMP, no compile |
 | `cpu` | any | No `.half()`, no AMP, no GradScaler, no compile |
@@ -354,7 +358,6 @@ Outputs written to `results/`:
 |--------|---------|----------|
 | `scripts/train.py` | Train RangeImageUNet | `--config`, `--resume`, `--device`, `--precision`, `--processed-root` |
 | `scripts/preprocess_to_shards.py` | Raw .bin → tar shards | `--raw-root`, `--processed-root`, `--train-seqs`, `--val-seqs`, `--force` |
-| `scripts/run_live_demo.py` | Launch backend + dashboard | `--cpu`, `--host`, `--port`, `--no-dashboard` |
 | `scripts/download_checkpoint.py` | Fetch best_miou.pt from Release | `--url`, `--out`, `--force` |
 | `scripts/export_onnx.py` | Export UNet to ONNX | `--checkpoint`, `--out`, `--opset 17` |
 | `eval/run_evaluation.py` | Full eval harness | `--device`, `--precision`, `--pixel-only`, `--point-only`, `--limit` |
@@ -364,7 +367,7 @@ Outputs written to `results/`:
 
 ## WebSocket Protocol
 
-Real-time data uses a compact binary framing protocol (40–100× smaller than JSON):
+Real-time data uses a compact binary framing protocol (40-100× smaller than JSON):
 
 ### Header (44 bytes)
 
@@ -432,15 +435,16 @@ This fetches `best_miou.pt` from [v1.0.0](https://github.com/isometric-iitm/LiDA
 
 A Next.js 16 + Three.js real-time 3D dashboard with interactive map, point cloud overlays, playback controls, and training curves. See **[dashboard/README.md](dashboard/README.md)** for full documentation.
 
-<!-- TODO: Add dashboard screenshot -->
-<!--
-![Dashboard](docs/assets/dashboard_grid.png)
--->
+| 2.5D Grid | Segmented Cloud | Compare (Grid + Raw Cloud) |
+|-----------|-----------------|----------------------------|
+| ![2.5D Grid](docs/assets/grid_2.5d.png) | ![Segmented Cloud](docs/assets/segmented_cloud.png) | ![Compare View](docs/assets/compare_view.png) |
+
+*Full animated demo at the top of this README.*
 
 ---
 
 ## Credits
 
-- **Dataset**: [SemanticKITTI](http://semantic-kitti.org/) — Geiger et al., IV 2012 / Behley et al., ICCV 2019
+- **Dataset**: [SemanticKITTI](http://semantic-kitti.org/) - Geiger et al., IV 2012 / Behley et al., ICCV 2019
 - **Framework**: [PyTorch](https://pytorch.org/), [FastAPI](https://fastapi.tiangolo.com/), [Next.js](https://nextjs.org/), [Three.js](https://threejs.org/)
-- **Loss**: Lovasz-Softmax — Berman et al., CVPR 2018
+- **Loss**: Lovasz-Softmax - Berman et al., CVPR 2018

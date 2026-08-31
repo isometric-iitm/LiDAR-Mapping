@@ -12,6 +12,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { DashboardSpeed, Refresh } from "iconoir-react";
 
 type HistoryEntry = {
   step: number;
@@ -49,7 +50,7 @@ function ChartTooltip({
 }) {
   if (!active || !payload?.length) return null;
   return (
-    <div className="rounded-md border border-zinc-700 bg-zinc-900/95 px-3 py-2 text-xs shadow-xl">
+    <div className="rounded-[4px] border border-zinc-700 bg-zinc-900/95 px-3 py-2 text-xs">
       <div className="mb-1 font-mono text-zinc-400">step {label}</div>
       {payload.map((p, k) => (
         <div key={k} className="flex items-center justify-between gap-4">
@@ -70,7 +71,7 @@ function MetricChart({ title, rows }: { title: string; rows: Record<string, numb
       <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">{title}</h3>
       <div className="h-[290px]">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={rows} margin={{ top: 8, right: 18, bottom: 8, left: -10 }}>
+          <LineChart data={rows} margin={{ top: 8, right: 26, bottom: 8, left: 0 }}>
             <CartesianGrid stroke="#27272a" strokeDasharray="3 3" vertical={false} />
             <XAxis
               dataKey="step"
@@ -79,17 +80,18 @@ function MetricChart({ title, rows }: { title: string; rows: Record<string, numb
               tickFormatter={(v: number) => v.toLocaleString()}
               tickLine={false}
             />
-            <YAxis yAxisId="iou" domain={[0, 1]} stroke="#71717a" fontSize={10} width={34} tickLine={false} />
+            <YAxis yAxisId="iou" domain={[0, 1]} stroke="#71717a" fontSize={10} width={46} tickLine={false} />
             <YAxis
               yAxisId="loss"
               orientation="right"
               domain={["auto", "auto"]}
               stroke="#71717a"
               fontSize={10}
-              width={40}
+              width={48}
               tickLine={false}
+              tickFormatter={(v: number) => Number(v).toFixed(3)}
             />
-            <Tooltip content={<ChartTooltip />} />
+            <Tooltip content={<ChartTooltip />} cursor={{ stroke: "#71717a", strokeDasharray: "3 3" }} />
             <Legend wrapperStyle={{ fontSize: 11 }} iconSize={8} />
             {METRIC_SERIES.map((s) => (
               <Line
@@ -119,7 +121,7 @@ function PerClassChart({ rows }: { rows: Record<string, number | undefined>[] })
       </h3>
       <div className="h-[290px]">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={rows} margin={{ top: 8, right: 18, bottom: 8, left: -10 }}>
+          <LineChart data={rows} margin={{ top: 8, right: 26, bottom: 8, left: 0 }}>
             <CartesianGrid stroke="#27272a" strokeDasharray="3 3" vertical={false} />
             <XAxis
               dataKey="step"
@@ -128,8 +130,8 @@ function PerClassChart({ rows }: { rows: Record<string, number | undefined>[] })
               tickFormatter={(v: number) => v.toLocaleString()}
               tickLine={false}
             />
-            <YAxis domain={[0, 100]} unit="%" stroke="#71717a" fontSize={10} width={36} tickLine={false} />
-            <Tooltip content={<ChartTooltip />} />
+            <YAxis domain={[0, 100]} unit="%" stroke="#71717a" fontSize={10} width={48} tickLine={false} />
+            <Tooltip content={<ChartTooltip />} cursor={{ stroke: "#71717a", strokeDasharray: "3 3" }} />
             <Legend wrapperStyle={{ fontSize: 11 }} iconSize={8} />
             {PER_CLASS.map((s) => (
               <Line
@@ -163,47 +165,74 @@ export default function TrainingCurves() {
       .finally(() => setLoading(false));
   }, []);
 
+  // history.jsonl logs the same "step" once per epoch (step 500, 1000, ... in
+  // epoch 0, 1, 2), so a raw "metrics vs step" line chart overplots 2-3 points
+  // at every x. Dedupe to the most recent record per step and sort ascending so
+  // the x-axis is monotonic and each step appears exactly once.
+  const series = useMemo(() => {
+    const byStep = new Map<number, HistoryEntry>();
+    for (const e of data) byStep.set(e.step, e);
+    return [...byStep.values()].sort((a, b) => a.step - b.step);
+  }, [data]);
+
   const metricRows = useMemo(
     () =>
-      data.map((e) => ({
+      series.map((e) => ({
         step: e.step,
         "mIoU (4-class)": e.miou_4class,
         "mIoU (5-class)": e.miou_5class,
         "val loss": e.val_loss,
       })),
-    [data]
+    [series]
   );
 
   const perClassRows = useMemo(
     () =>
-      data.map((e) => {
+      series.map((e) => {
         const row: Record<string, number | undefined> = { step: e.step };
         for (const s of PER_CLASS) row[s.label] = (e.class_ious_4?.[s.key] ?? 0) * 100;
         return row;
       }),
-    [data]
+    [series]
   );
 
-  if (loading) return <p className="p-8 text-sm text-zinc-400">Loading training history…</p>;
-  if (error) return <p className="p-8 text-sm text-rose-400">Failed: {error}</p>;
+  if (loading)
+    return (
+      <div className="mx-auto flex max-w-6xl items-center gap-2 px-6 py-8 text-sm text-zinc-400">
+        <Refresh className="h-4 w-4 animate-spin" strokeWidth={2} />
+        <span>Loading training history</span>
+      </div>
+    );
+  if (error)
+    return (
+      <div className="mx-auto max-w-6xl px-6 py-8 text-sm text-rose-400">Failed: {error}</div>
+    );
   if (!data.length)
-    return <p className="p-8 text-sm text-zinc-400">No history available (start the server / check ckpt_dir).</p>;
+    return (
+      <div className="mx-auto max-w-6xl px-6 py-8 text-sm text-zinc-400">
+        No history available (start the server / check ckpt_dir).
+      </div>
+    );
 
   const last = data[data.length - 1];
   const peak4 = Math.max(...data.map((d) => d.miou_4class));
 
   return (
     <div className="mx-auto max-w-6xl space-y-6 p-6">
-      <header>
-        <p className="mb-2 text-xs text-zinc-500">
-          <Link href="/" className="text-zinc-400 transition-colors hover:text-zinc-200">
-            ← Live map
-          </Link>
-        </p>
-        <h1 className="text-xl font-semibold">Training curves</h1>
-        <p className="mt-1 text-sm text-zinc-500">
-          Range-image UNet · SemanticKITTI (4-class binned eval) · {data.length} validation checkpoints
-        </p>
+      <header className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold">Training curves</h1>
+          <p className="mt-1 text-sm text-zinc-500">
+            Range-image UNet / SemanticKITTI (4-class binned eval) / {data.length} validation checkpoints
+          </p>
+        </div>
+        <Link
+          href="/eval"
+          className="flex items-center gap-1.5 rounded-[4px] bg-zinc-800 px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-700"
+        >
+          <DashboardSpeed width={14} height={14} strokeWidth={2} />
+          Evaluation
+        </Link>
       </header>
 
       <div className="grid grid-cols-3 gap-3">
@@ -215,7 +244,7 @@ export default function TrainingCurves() {
       <MetricChart title="Training metrics vs step" rows={metricRows} />
       <PerClassChart rows={perClassRows} />
       <p className="hud-cap text-center">
-        Hover for exact values · click legend entries to toggle series
+        Hover for exact values / click legend entries to toggle series
       </p>
     </div>
   );
