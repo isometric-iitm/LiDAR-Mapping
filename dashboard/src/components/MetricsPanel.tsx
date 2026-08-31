@@ -238,7 +238,7 @@ export default function MetricsPanel({
 
         <section className="mt-6">
           <h3 className="hud-sec mb-2">Pages</h3>
-          <div className="flex flex-col">
+          <div className="flex flex-row gap-4">
             <Link
               href="/training"
               className="py-1 text-sm text-zinc-400 transition-colors hover:text-zinc-100"

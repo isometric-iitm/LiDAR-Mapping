@@ -19,6 +19,7 @@ server:
   ckpt_dir: "checkpoints"        # for /metrics/history; override with $PC2D_CKPT_DIR
   cloud_points_max: 30000        # downsampled points for the accumulated cloud view
   cloud_history_frames: 30       # rolling world-anchored frames kept for accumulation
+  wire_compress: true            # zlib-compress binary WS frames (reduces bytes, slight CPU cost)
 
 dashboard:
   url: "http://localhost:3000"

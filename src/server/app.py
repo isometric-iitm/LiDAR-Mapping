@@ -69,6 +69,7 @@ class Pipeline:
         self.cloud_max = int(self.cfg["server"].get("cloud_points_max", 30000))
         self._snap_iv = int(self.cfg["server"].get("snapshot_interval_frames", 20))
         self._stats_iv = int(self.cfg["server"].get("stats_interval_frames", 10))
+        self._wire_compress = bool(self.cfg["server"].get("wire_compress", False))
 
         # rolling world-frame cloud history (for the ego-anchored accumulation view)
         self.cloud_history_frames = int(self.cfg["server"].get("cloud_history_frames", 30))
@@ -191,6 +192,8 @@ class Pipeline:
 
     def _emit(self, payload, kind: str = "text"):
         """Queue a broadcast payload. kind='text' -> JSON dict, 'binary' -> bytes frame."""
+        if kind != "text" and self._wire_compress:
+            payload = ws_protocol._maybe_compress(payload, enabled=True)
         item = ("T", payload) if kind == "text" else ("B", payload)
         # In precise mode every frame is a full snapshot (large). Instead of
         # dropping just the oldest entry and still overflowing next put, coalesce:
@@ -264,19 +267,18 @@ class Pipeline:
         stats_msg = None
         with self.grid_lock:
             self.grid.update(frame.points, cls4)
-            # precise (no-decay) mode: every frame is a full snapshot so client never holds stale cells
-            # until the next incremental snapshot — eliminates the "older stays until new comes" ghost.
-            if not self.grid.decay_enabled:
-                snap = self.grid.snapshot()
-                is_snap = True
-                self._last_snapshot_frame = self.grid.frame
-            elif self.grid.frame - self._last_snapshot_frame >= snap_iv:
+            t_update = time.perf_counter()
+            # Both precise and decay modes respect snapshot_interval_frames:
+            # send full snapshot periodically, deltas in between.
+            # This avoids O(n_cells) snapshot cost every frame in precise mode.
+            if self.grid.frame - self._last_snapshot_frame >= snap_iv:
                 snap = self.grid.snapshot()
                 is_snap = True
                 self._last_snapshot_frame = self.grid.frame
             else:
                 snap = self.grid.delta()
                 is_snap = False
+            t_snap = time.perf_counter()
             if self.grid.frame - self._last_stats_frame >= stats_iv:
                 # Recompute every interval so rendered KB / compression reflect live scene (was cached static)
                 self._mem = self.grid.memory_report()
@@ -287,10 +289,16 @@ class Pipeline:
 
         # binary grid frames (40-100x smaller than JSON, no .tolist() tax)
         yaw_cd = self._yaw_cd(frame.idx)
+        n_rows = snap["rows"].shape[0]
+        n_freed = snap.get("freed", np.zeros((0, 2))).shape[0] if not is_snap else 0
         frames = (ws_protocol.iter_snapshot_frames(snap["frame"], self.epoch, snap["rows"], snap["cls"], yaw_cd=yaw_cd)
                   if is_snap else
                   ws_protocol.iter_delta_frames(snap["frame"], self.epoch, snap["rows"], snap["cls"], snap["freed"], yaw_cd=yaw_cd))
+        n_chunks = 0
+        wire_bytes = 0
         for b in frames:
+            wire_bytes += len(b)
+            n_chunks += 1
             self._emit(b, "binary")
         if not self._first_frame_emitted:
             self._first_frame_emitted = True
@@ -312,6 +320,8 @@ class Pipeline:
 
         proc_ms = (time.perf_counter() - t0) * 1000.0
         grid_ms = (t_grid - t_seg) * 1000.0
+        update_ms = self.grid._timings.get("total_ms", 0.0)
+        snap_ms = self.grid._timings.get("snapshot_ms", self.grid._timings.get("delta_ms", 0.0))
         pack_ms = (t_pack - t_grid) * 1000.0
         self._stage_window["seg"].append(timings.get("total", 0.0))
         self._stage_window["grid"].append(grid_ms)
@@ -336,19 +346,24 @@ class Pipeline:
         if self._perf_n >= 30 or proc_ms > 400.0:
             n = self._perf_n
             avg = {k: v / n for k, v in self._perf_sum.items()}
-            qd = self.messages.qsize()
-            try:
-                sr = snap["rows"]
-                tot = int(sr.shape[0])
-                if tot:
-                    js = sr[:, 1]  # sector j
-                    behind = int(np.count_nonzero((js < 90) | (js > 630)))
-                    front = tot - behind
-                else:
-                    behind = front = 0
-                    tot = 0
-            except:
-                tot = behind = front = -1
+            gt = self.grid._timings
+            tag = "SNAP" if is_snap else "DELTA"
+            print(
+                f"[perf] f={self.grid.frame:5d} {tag:4s} | "
+                f"proc={avg['proc']:.1f}ms seg={avg['seg']:.1f} "
+                f"update={update_ms:.1f} snap/delta={snap_ms:.1f} "
+                f"pack={avg['pack']:.1f} cloud={self._stage_window['cloud'][-1]:.1f} | "
+                f"rows={n_rows:5d} freed={n_freed:4d} chunks={n_chunks} "
+                f"wire={wire_bytes/1024:.0f}KB | "
+                f"rendered={self.grid._last_n_rendered:6d} "
+                f"hit={self.grid._last_n_hit:5d} "
+                f"n_cells={self.grid.n_cells} | "
+                f"polar={gt.get('polar_ms',0):.1f} "
+                f"reduce={gt.get('reduce_ms',0):.1f} "
+                f"cls={gt.get('cls_ms',0):.1f} "
+                f"state={gt.get('state_ms',0):.1f} | "
+                f"queue={self.messages.qsize()}"
+            )
             self._perf_n = 0
             self._perf_sum = {"seg": 0.0, "grid": 0.0, "pack": 0.0, "proc": 0.0}
 

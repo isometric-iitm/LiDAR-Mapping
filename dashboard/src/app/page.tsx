@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable react-hooks/immutability */
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, OrthographicCamera, PerspectiveCamera } from "@react-three/drei";
@@ -170,8 +170,22 @@ export default function Home() {
   const [animTarget, setAnimTarget] = useState<{ pos: THREE.Vector3; look: THREE.Vector3 } | null>(null);
   const [availableSeqs, setAvailableSeqs] = useState<SeqInfo[]>([]);
 
+  // client-side perf tracking (wired to PerfOverlay)
+  const clientPerfRef = useRef({ fps: 0, js: 0, draws: 0, tris: 0 });
+  const clientPerfN = useRef(0);
+  const onClientPerf = useCallback((s: { fps: number; js: number; draws: number; tris: number }) => {
+    clientPerfRef.current = s;
+    clientPerfN.current += 1;
+    if (clientPerfN.current % 10 === 0) {
+      console.debug(
+        `[render:perf] client_fps=${s.fps.toFixed(1)} js=${s.js.toFixed(1)}ms ` +
+        `draws=${s.draws} tris=${(s.tris / 1000).toFixed(0)}K`
+      );
+    }
+  }, []);
+
   const maxR = meta?.r_max ?? 100;
-  const gridEdges = meta ? computeGridEdges(meta) : [];
+  const gridEdges = useMemo(() => meta ? computeGridEdges(meta) : [], [meta?.r_min, meta?.dr_0, meta?.alpha, meta?.n_rings]);
   const nTheta = meta?.n_theta ?? 720;
 
   const resetNorth = () => {
@@ -292,7 +306,7 @@ export default function Home() {
               minZoom={0.3}
               maxZoom={12}
             />
-            <PerfOverlay />
+            <PerfOverlay onStats={onClientPerf} />
             <DemandInvalidator patch={patch} camMode={camMode} />
             {animTarget && (
               <CameraAnimator

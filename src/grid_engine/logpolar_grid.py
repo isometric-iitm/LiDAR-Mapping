@@ -1,4 +1,5 @@
 import math
+import time
 from pathlib import Path
 
 import numpy as np
@@ -98,6 +99,14 @@ class LogPolarGrid:
         self._touched = np.zeros(self.n_cells, dtype=bool)
         self._ever_seen = np.zeros(self.n_cells, dtype=bool)
 
+        # per-frame timing breakdown (reset each update() call)
+        self._timings: dict[str, float] = {}
+        self._last_n_hit = 0
+        self._last_n_rendered = 0
+        self._last_n_freed = 0
+        self._last_n_changed = 0
+        self._last_payload_bytes = 0
+
     # --- geometry ---
     def ring_index(self, r: np.ndarray) -> np.ndarray:
         """Ring index via searchsorted over the cumulative-sum ring boundaries."""
@@ -119,6 +128,7 @@ class LogPolarGrid:
     # --- frame update ---
     def update(self, points: np.ndarray, per_class: np.ndarray) -> int:
         """Points: [N, >=3] float32 (x,y,z,...). per_class: [N] uint8 in [0, n_classes)."""
+        t_start = time.perf_counter()
         n = points.shape[0]
         r = np.hypot(points[:, 0], points[:, 1])
         theta = np.arctan2(points[:, 1], points[:, 0])
@@ -133,12 +143,14 @@ class LogPolarGrid:
 
         keep = (r >= self.r_min) & (r <= self.r_max) & (z >= self.z_min) & (z <= self.z_max)
         if not np.any(keep):
+            self._timings = {"total_ms": (time.perf_counter() - t_start) * 1000}
             return 0
 
         rk, tk, zk, pck = r[keep], theta[keep], z[keep], per_class[keep]
         i = np.clip(self.ring_index(rk), 0, self.n_rings - 1)
         j = self.sector_index(tk)
         cells = i * self.n_theta + j
+        t_polar = time.perf_counter()
 
         # occupancy handling: precise mode (decay disabled) = per-frame sensor view,
         # no temporal persistence; otherwise exponential decay.
@@ -146,9 +158,7 @@ class LogPolarGrid:
         if self.decay_enabled:
             decay = math.exp(-(1.0 / self.frame_hz) / self.tau_free)
             self.occupancy *= decay
-        else:
-            # precise: occupancy will be set per-frame below; no decay to apply here
-            pass
+        t_occ = time.perf_counter()
 
         # grouped scatter-reduce: one stable sort + vectorized min/max/sum,
         # replacing 5 unbuffered np.*.at calls (~10x faster, SIMD-friendly)
@@ -165,17 +175,34 @@ class LogPolarGrid:
         zmin_c = np.minimum.reduceat(zsort, firsts)
         zmax_c = np.maximum.reduceat(zsort, firsts)
         zsum_c = np.add.reduceat(zsort.astype(np.float64), firsts)
+        t_reduce = time.perf_counter()
 
-        cls_key = csort.astype(np.int64) * self.n_classes + pck[order].astype(np.int64)
-        cls_counts = np.bincount(cls_key, minlength=self.n_cells * self.n_classes).reshape(self.n_cells, self.n_classes)
-
-        # stash per-frame scratch (scatter only the hit cells)
-        self._z_min_f[uniq] = zmin_c.astype(np.float32)
-        self._z_max_f[uniq] = zmax_c.astype(np.float32)
-        self._z_sum_f[uniq] = zsum_c
-        self._count_f[uniq] = seg_count
-        self._cls_count_f[uniq] = cls_counts[uniq]
-        self._touched[uniq] = True
+        # class counts. Decay mode needs the full-grid bincount (for EMA over
+        # all cells); precise mode only needs per-hit majority, computed from
+        # the already-sorted (by cell) class labels via per-segment bincounts.
+        cls_counts = None
+        if self.decay_enabled:
+            cls_key = csort.astype(np.int64) * self.n_classes + pck[order].astype(np.int64)
+            cls_counts = np.bincount(cls_key, minlength=self.n_cells * self.n_classes).reshape(self.n_cells, self.n_classes)
+            # stash per-frame scratch (scatter only the hit cells)
+            self._z_min_f[uniq] = zmin_c.astype(np.float32)
+            self._z_max_f[uniq] = zmax_c.astype(np.float32)
+            self._z_sum_f[uniq] = zsum_c
+            self._count_f[uniq] = seg_count
+            self._cls_count_f[uniq] = cls_counts[uniq]
+            self._touched[uniq] = True
+        else:
+            # precise: per-hit majority vote (rows aligned to `uniq`).
+            # Fully vectorized: map each point to its unique-cell group index via
+            # searchsorted, then one bincount gives per-(cell,class) counts.
+            # Equivalent to the per-segment majority but ~10-20x faster (C-level).
+            seg_labels = pck[order]
+            local = np.searchsorted(uniq, csort)
+            cls_counts = np.bincount(
+                local * self.n_classes + seg_labels.astype(np.int64),
+                minlength=uniq.shape[0] * self.n_classes,
+            ).reshape(uniq.shape[0], self.n_classes)
+        t_cls = time.perf_counter()
 
         if self.decay_enabled:
             # decaying mode: occupancy EMA, class EMA, z running min/max/EMA
@@ -215,7 +242,7 @@ class LogPolarGrid:
                 self.occupancy[to_free] = 0.0
             # class: per-frame majority (no history)
             self.dominant_class[uniq] = np.argmax(
-                cls_counts[uniq].astype(np.float32) / seg_count[:, None].astype(np.float32), axis=1
+                cls_counts.astype(np.float32) / seg_count[:, None].astype(np.float32), axis=1
             ).astype(np.uint8)
             self.cls_hist[uniq] = 0
             # one-hot the current dominant for debug consistency
@@ -284,9 +311,26 @@ class LogPolarGrid:
                 slope_thresh=self.trav_slope_thresh,
             )
             self._trav_dirty = False
+        t_state = time.perf_counter()
 
         n_hit = len(uniq)
-        self._clear_scratch()
+        self._last_n_hit = n_hit
+        # Skip _clear_scratch in precise mode: scratch arrays are only used in decay mode
+        if self.decay_enabled:
+            self._clear_scratch()
+        t_end = time.perf_counter()
+
+        self._timings = {
+            "polar_ms": (t_polar - t_start) * 1000,
+            "occ_ms": (t_occ - t_polar) * 1000,
+            "reduce_ms": (t_reduce - t_occ) * 1000,
+            "cls_ms": (t_cls - t_reduce) * 1000,
+            "state_ms": (t_state - t_cls) * 1000,
+            "total_ms": (t_end - t_start) * 1000,
+            "n_hit": n_hit,
+            "n_input": int(points.shape[0]),
+            "n_rendered": int(np.count_nonzero(self.occupancy > self.occ_threshold)),
+        }
         return n_hit
 
     def _clear_scratch(self):
@@ -328,18 +372,28 @@ class LogPolarGrid:
         cls: (k,) uint8} — raw arrays, packed to binary by the protocol layer.
         Marks every cell as sent so subsequent deltas are purely incremental.
         """
+        t0 = time.perf_counter()
         mask = self.rendered()
+        t_mask = time.perf_counter()
         idx = np.nonzero(mask)[0]
         if idx.size:
             rows, cls = self._rows(idx)
         else:
             rows = np.zeros((0, 7), dtype=np.float32)
             cls = np.zeros(0, dtype=np.uint8)
+        t_rows = time.perf_counter()
         self._prev_rendered = mask
         self._mark_sent(idx)
         clear = np.nonzero(~mask)[0]
         self._sent_zmax[clear] = 0.0
         self._sent_cls[clear] = UNKNOWN
+        self._last_n_rendered = int(idx.size)
+        self._last_n_freed = 0
+        self._last_n_changed = int(idx.size)
+        t_end = time.perf_counter()
+        self._timings["snapshot_ms"] = (t_end - t0) * 1000
+        self._timings["snapshot_mask_ms"] = (t_mask - t0) * 1000
+        self._timings["snapshot_rows_ms"] = (t_rows - t_mask) * 1000
         return {"frame": self.frame, "rows": rows, "cls": cls}
 
     def delta(self) -> dict:
@@ -357,6 +411,7 @@ class LogPolarGrid:
         cell each frame); alpha is refreshed when a cell is (re)added and at
         every snapshot.
         """
+        t0 = time.perf_counter()
         mask = self.rendered()
         added = mask & ~self._prev_rendered
         freed = self._prev_rendered & ~mask
@@ -364,6 +419,7 @@ class LogPolarGrid:
             (np.abs(self._z_max_state - self._sent_zmax) >= 0.05)
             | (self.dominant_class != self._sent_cls)
         )
+        t_detect = time.perf_counter()
         idx = np.nonzero(added | changed)[0]
         if idx.size:
             rows, cls = self._rows(idx)
@@ -383,6 +439,12 @@ class LogPolarGrid:
             freed_rows = np.zeros((0, 2), dtype=np.float32)
         self._sent_zmax[idx_free] = 0.0
         self._sent_cls[idx_free] = UNKNOWN
+        t_end = time.perf_counter()
+        self._last_n_rendered = int(np.count_nonzero(mask))
+        self._last_n_freed = int(idx_free.size)
+        self._last_n_changed = int(idx.size)
+        self._timings["delta_ms"] = (t_end - t0) * 1000
+        self._timings["delta_detect_ms"] = (t_detect - t0) * 1000
         return {
             "frame": self.frame,
             "rows": rows,

@@ -45,6 +45,24 @@ const K_SNAPSHOT = 1;
 const K_DELTA = 2;
 const K_CLOUD = 3;
 
+/** Decompress a binary frame if it has the 'Z' prefix (zlib-compressed). */
+function maybeDecompress(buf: ArrayBuffer): ArrayBuffer {
+  const u8 = new Uint8Array(buf);
+  if (u8.length > 5 && u8[0] === 0x5a) { // 'Z'
+    const origSize = new DataView(buf).getUint32(1, true);
+    // Use DecompressionStream (native browser API) — but it's async.
+    // For sync path, fall back to pako if available, else pass through.
+    // Since DecompressionStream is async, we handle this in the caller.
+    // For now, return a marker that the caller can detect.
+    return buf; // caller will check first byte
+  }
+  return buf;
+}
+
+/** Decode a server binary frame (see src/server/ws_protocol.py, 44-byte
+ *  header `struct "<IHHQQiiiii"`) into the legacy message shapes so the
+ *  existing chunk/epoch/freeze logic is shared. */
+
 /** ServerMsg plus the fields the binary channel carries that the legacy JSON
  *  shapes didn't (chunk bookkeeping on cloud frames, typed-array payloads,
  *  per-frame ego yaw in radians). */
@@ -67,9 +85,6 @@ type MapMsg =
       yaw?: number;
     });
 
-/** Decode a server binary frame (see src/server/ws_protocol.py, 44-byte
- *  header `struct "<IHHQQiiiii"`) into the legacy message shapes so the
- *  existing chunk/epoch/freeze logic is shared. */
 function parseBinary(buf: ArrayBuffer): MapMsg | null {
   const dv = new DataView(buf);
   if (dv.byteLength < 44 || dv.getUint32(0, true) !== MAGIC) return null;
@@ -140,10 +155,41 @@ export function useMapStream(): UseMapStream {
 
   const deltaAcc = useRef<Cell[]>([]);
 
+  // perf logging accumulators
+  const perfRef = useRef({ n: 0, totalParseMs: 0, totalHandleMs: 0, totalBytes: 0 });
+
   useEffect(() => {
     let cancelled = false;
     let retry: ReturnType<typeof setTimeout> | null = null;
     let attempts = 0;
+
+    /** Decompress zlib-compressed binary frame (prefixed with 'Z' + uint32 size). */
+    const decompressFrame = async (buf: ArrayBuffer): Promise<ArrayBuffer> => {
+      const u8 = new Uint8Array(buf);
+      if (u8.length <= 5 || u8[0] !== 0x5a) return buf; // not compressed
+      try {
+        const ds = new DecompressionStream("deflate-raw");
+        const writer = ds.writable.getWriter();
+        // skip 1-byte 'Z' prefix + 4-byte original size
+        writer.write(u8.slice(5));
+        writer.close();
+        const reader = ds.readable.getReader();
+        const chunks: Uint8Array[] = [];
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+        }
+        const totalLen = chunks.reduce((s, c) => s + c.length, 0);
+        const out = new Uint8Array(totalLen);
+        let off = 0;
+        for (const c of chunks) { out.set(c, off); off += c.length; }
+        return out.buffer;
+      } catch (e) {
+        console.warn("[ws] decompress failed, using raw:", e);
+        return buf;
+      }
+    };
 
     const connect = () => {
       if (cancelled) return;
@@ -277,6 +323,7 @@ export function useMapStream(): UseMapStream {
         if (msg.type === "delta") {
           // Incremental: apply chunks directly onto the live map. 'freed' is
           // attached to the final chunk so it arrives here only once.
+          const t0 = performance.now();
           for (const c of msg.cells) {
             full.current.set(`${c[0]}:${c[1]}`, c);
             deltaAcc.current.push(c);
@@ -285,9 +332,21 @@ export function useMapStream(): UseMapStream {
             full.current.delete(`${i}:${j}`);
           }
           if (msg.seq === msg.total - 1) {
-            setCells(new Map(full.current));
+            const mapCopy0 = performance.now();
+            // Pass the live map reference (not a full copy): `cells` is only
+            // read on snapshot frames and for the empty/hint check, so an
+            // O(n) copy each delta frame is wasted work. Snapshots resync it.
+            setCells(full.current);
             setLastFrame(msg.frame);
             setPatch({ kind: "delta", frame: msg.frame, upserts: deltaAcc.current, frees: msg.freed });
+            const mapCopyMs = performance.now() - mapCopy0;
+            const totalMs = performance.now() - t0;
+            console.debug(
+              `[ws:delta] f=${msg.frame} seq=${msg.seq}/${msg.total} ` +
+              `cells=${msg.cells.length} freed=${msg.freed.length} ` +
+              `map_size=${full.current.size} ` +
+              `map_copy=${mapCopyMs.toFixed(1)}ms handle=${totalMs.toFixed(1)}ms`
+            );
             deltaAcc.current = [];
             if (full.current.size > 0) setBuffering(false);
           }
@@ -295,6 +354,7 @@ export function useMapStream(): UseMapStream {
         }
 
         if (msg.type === "snapshot") {
+          const t0 = performance.now();
           if (msg.seq === 0) {
             snapBuf.current = new Map();
             snapFrame.current = msg.frame;
@@ -303,16 +363,23 @@ export function useMapStream(): UseMapStream {
             snapBuf.current.set(`${c[0]}:${c[1]}`, c);
           }
           if (msg.seq === msg.total - 1) {
+            const t1 = performance.now();
             full.current = new Map(snapBuf.current);
             setCells(new Map(full.current));
             setLastFrame(msg.frame);
             setPatch({ kind: "snap", frame: msg.frame, upserts: [...snapBuf.current.values()] });
+            const t2 = performance.now();
+            console.debug(
+              `[ws:snap] f=${msg.frame} seq=${msg.seq}/${msg.total} ` +
+              `upserts=${snapBuf.current.size} ` +
+              `map_copy=${(t2 - t1).toFixed(1)}ms total=${(t2 - t0).toFixed(1)}ms`
+            );
             if (full.current.size > 0) setBuffering(false);
           }
         }
       };
 
-      ws.onmessage = (ev) => {
+      ws.onmessage = async (ev) => {
         if (cancelled) return;
         if (typeof ev.data === "string") {
           try {
@@ -321,8 +388,34 @@ export function useMapStream(): UseMapStream {
             /* ignore malformed */
           }
         } else {
-          const msg = parseBinary(ev.data as ArrayBuffer);
+          const t0 = performance.now();
+          let buf = ev.data as ArrayBuffer;
+          // decompress if server-side wire compression is enabled (Z prefix)
+          const u8Check = new Uint8Array(buf);
+          if (u8Check.length > 5 && u8Check[0] === 0x5a) {
+            buf = await decompressFrame(buf);
+          }
+          const parseMs = performance.now() - t0;
+          const msg = parseBinary(buf);
+          const t1 = performance.now();
           if (msg) handleMsg(msg);
+          const handleMs = performance.now() - t1;
+          // perf logging: aggregate every 30 frames
+          const p = perfRef.current;
+          p.n += 1;
+          p.totalParseMs += parseMs;
+          p.totalHandleMs += handleMs;
+          p.totalBytes += (ev.data as ArrayBuffer).byteLength;
+          if (p.n >= 30) {
+            console.debug(
+              `[ws:perf] frames=${p.n} ` +
+              `avg_parse=${(p.totalParseMs / p.n).toFixed(2)}ms ` +
+              `avg_handle=${(p.totalHandleMs / p.n).toFixed(2)}ms ` +
+              `avg_bytes=${(p.totalBytes / p.n / 1024).toFixed(1)}KB ` +
+              `total_bytes=${(p.totalBytes / 1024).toFixed(0)}KB`
+            );
+            perfRef.current = { n: 0, totalParseMs: 0, totalHandleMs: 0, totalBytes: 0 };
+          }
         }
       };
 

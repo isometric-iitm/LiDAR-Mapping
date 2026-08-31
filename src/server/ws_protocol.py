@@ -1,4 +1,5 @@
 import struct
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -112,6 +113,38 @@ def iter_cloud_frames(frame: int, epoch: int, xyz: np.ndarray, cls: np.ndarray,
         body = (xyz[s:e].reshape(-1).astype("<f4", copy=False).tobytes()
                 + cls[s:e].astype(np.uint8, copy=False).tobytes())
         yield (_head(K_CLOUD, frame, epoch, e - s, 0, p, total, yaw_cd) + body)
+
+
+# --- Compression (optional, toggled via config) ---
+_COMPRESS_LEVEL = 1  # zlib fastest (1-9); level 1 is ~50 MB/s compression, ~200 MB/s decompress
+_COMPRESS_THRESHOLD = 512  # don't bother compressing payloads under this many bytes
+
+
+def _raw_deflate(body: bytes) -> bytes:
+    """Compress with raw DEFLATE (no zlib header/trailer), matching the browser's
+    DecompressionStream('deflate-raw') so the dashboard can inflate it natively."""
+    cobj = zlib.compressobj(_COMPRESS_LEVEL, zlib.DEFLATED, -15)
+    return cobj.compress(body) + cobj.flush()
+
+
+def _maybe_compress(body: bytes, enabled: bool = False) -> bytes:
+    """Optionally compress a binary frame body with raw DEFLATE (level 1, fast).
+    Returns compressed bytes with a 5-byte prefix: b'Z' + uint32 original size.
+    Returns original body if compression is disabled or payload too small."""
+    if not enabled or len(body) < _COMPRESS_THRESHOLD:
+        return body
+    compressed = _raw_deflate(body)
+    if len(compressed) >= len(body):
+        return body  # no benefit
+    return b"Z" + struct.pack("<I", len(body)) + compressed
+
+
+def decompress_if_needed(data: bytes) -> bytes:
+    """Decompress a binary frame body if it has the 'Z' prefix (raw DEFLATE)."""
+    if len(data) > 5 and data[0:1] == b"Z":
+        orig_size = struct.unpack("<I", data[1:5])[0]
+        return zlib.decompress(data[5:], wbits=-15)
+    return data
 
 
 # --- JSON variants (HTTP endpoints / legacy) ---

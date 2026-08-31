@@ -2,7 +2,7 @@
 /* eslint-disable react-hooks/immutability */
 
 import { useFrame, useThree } from "@react-three/fiber";
-import { useLayoutEffect, useMemo, useRef } from "react";
+import React, { useLayoutEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import { CLASS_COLOR } from "@/lib/colors";
 import { Html } from "@react-three/drei";
@@ -28,6 +28,7 @@ export type CellGeo = CellInfo & {
   scale: [number, number, number];
   color: string;
   alpha: number;
+  rgb: number;
 };
 
 export const RING_RADII = [10, 25, 50, 120];
@@ -186,11 +187,20 @@ function InstancedCells({
       const secA = c.sec[j];
       const height = Math.min(12, Math.max(0.35, zMax));
       const posY = height / 2;
-      t.p.set(b.posX, posY, b.posZ);
-      t.q.copy(secA.q);
-      t.s.set(b.scaleX, height, b.scaleZ);
-      t.m.compose(t.p, t.q, t.s);
-      mesh.setMatrixAt(slot, t.m);
+      // Reuse the cached geometry: matrix only changes with (pos, rot, scale),
+      // all of which are fixed by (i, j, zMax). If those are unchanged we skip
+      // the compose + setMatrixAt entirely (~37k/frame saved in steady scenes).
+      const needMatrix = !prev ||
+        prev.pos[0] !== b.posX || prev.pos[1] !== posY || prev.pos[2] !== b.posZ ||
+        prev.rotY !== secA.th ||
+        prev.scale[0] !== b.scaleX || prev.scale[1] !== height || prev.scale[2] !== b.scaleZ;
+      if (needMatrix) {
+        t.p.set(b.posX, posY, b.posZ);
+        t.q.copy(secA.q);
+        t.s.set(b.scaleX, height, b.scaleZ);
+        t.m.compose(t.p, t.q, t.s);
+        mesh.setMatrixAt(slot, t.m);
+      }
       let cellColor: number;
       if (travMode) {
         if (trav >= 0.7) cellColor = 0x22c55e;       // green: drivable
@@ -205,24 +215,30 @@ function InstancedCells({
       const rMid = (c.edges[i] + c.edges[i + 1]) / 2;
       const bandIntensity = rMid < 5 ? 1.0 : rMid < 10 ? 0.9 : rMid < 25 ? 0.78 : rMid < 50 ? 0.62 : 0.48;
       t.c.setHex(cellColor);
-      mesh.setColorAt(slot, t.c.multiplyScalar((0.35 + 0.65 * Math.min(1, 0.4 + occ)) * bandIntensity));
-      c.geo[slot] = {
-        i,
-        j,
-        zMean,
-        zMax,
-        cls,
-        occ,
-        dyn,
-        trav,
-        pos: [b.posX, posY, b.posZ],
-        rotY: secA.th,
-        scale: [b.scaleX, height, b.scaleZ],
-        color: travMode
-          ? (trav >= 0.7 ? "#22c55e" : trav >= 0.4 ? "#f59e0b" : "#ef4444")
-          : (CLASS_COLOR.get(cls) ?? "#ffffff"),
-        alpha: Math.min(1, 0.4 + occ),
-      };
+      t.c.multiplyScalar((0.35 + 0.65 * Math.min(1, 0.4 + occ)) * bandIntensity);
+      // Only write the per-instance color attribute when the RGB actually changed.
+      if (!prev || prev.rgb !== t.c.getHex()) {
+        mesh.setColorAt(slot, t.c);
+      }
+      // Reuse the slot's geo object (avoid ~37k allocations/frame -> GC pressure).
+      const g = prev ?? ({} as CellGeo);
+      g.i = i;
+      g.j = j;
+      g.zMean = zMean;
+      g.zMax = zMax;
+      g.cls = cls;
+      g.occ = occ;
+      g.dyn = dyn;
+      g.trav = trav;
+      g.pos = [b.posX, posY, b.posZ];
+      g.rotY = secA.th;
+      g.scale = [b.scaleX, height, b.scaleZ];
+      g.color = travMode
+        ? (trav >= 0.7 ? "#22c55e" : trav >= 0.4 ? "#f59e0b" : "#ef4444")
+        : (CLASS_COLOR.get(cls) ?? "#ffffff");
+      g.alpha = Math.min(1, 0.4 + occ);
+      g.rgb = t.c.getHex();
+      c.geo[slot] = g;
       return true;
     };
 
@@ -232,7 +248,7 @@ function InstancedCells({
       if (slot === undefined) return false;
       // Park freed instances far below ground with zero scale so they don't
       // cluster at the ego origin as degenerate flickering lines/dots (precise
-      // mode frees ~1k slots per frame).
+      // mode frees ~30k slots per frame).
       t.p.set(0, -1000, 0);
       t.s.set(0, 0, 0);
       t.q.identity();
@@ -247,22 +263,33 @@ function InstancedCells({
     };
 
     let dirty = false;
+    let written = 0;
+    let freed_count = 0;
+    const t0 = performance.now();
     if (patch.kind === "reset") {
       clearAll();
       dirty = true;
     } else if (patch.kind === "delta") {
-      for (const cell of patch.upserts) dirty = writeCell(cell) || dirty;
-      for (const [i, j] of patch.frees) dirty = freeCell(i, j) || dirty;
+      for (const cell of patch.upserts) { if (writeCell(cell)) written++; dirty = true; }
+      for (const [i, j] of patch.frees) { if (freeCell(i, j)) freed_count++; dirty = true; }
     } else {
       // snapshot: reconcile against the authoritative full map, skipping
       // slots/rows whose values are unchanged so steady-state snapshots are ~free.
       for (const key of [...c.slotOf.keys()]) {
-        if (!cells.has(key)) dirty = freeCell(Number(key.split(":")[0]), Number(key.split(":")[1])) || dirty;
+        if (!cells.has(key)) { freeCell(Number(key.split(":")[0]), Number(key.split(":")[1])); freed_count++; dirty = true; }
       }
       for (const cell of patch.upserts) {
         if (!cells.has(`${cell[0]}:${cell[1]}`)) continue;
-        dirty = writeCell(cell) || dirty;
+        if (writeCell(cell)) written++;
+        dirty = true;
       }
+    }
+    const layoutMs = performance.now() - t0;
+    if (written > 0 || freed_count > 0) {
+      console.debug(
+        `[grid:render] patch=${patch.kind} written=${written} freed=${freed_count} ` +
+        `live=${c.next} dirty=${dirty} layout=${layoutMs.toFixed(1)}ms`
+      );
     }
 
     if (dirty) {
@@ -314,7 +341,7 @@ function InstancedCells({
   );
 }
 
-export function CellLayer({
+export const CellLayer = React.memo(function CellLayer({
   cells,
   meta,
   patch,
@@ -339,7 +366,7 @@ export function CellLayer({
       travMode={travMode}
     />
   );
-}
+});
 
 // ---- point cloud (raw sensor + segmented) ----
 // Map convention: forward = +X, left = +Z, up = +Y.

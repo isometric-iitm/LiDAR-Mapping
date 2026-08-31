@@ -133,3 +133,41 @@ class TestBinaryRowLayout:
         assert i_val >= 0
         assert j_val >= 0
         assert 0.0 <= trav_val <= 1.0
+
+
+class TestWireCompression:
+    def test_roundtrip_preserves_payload(self):
+        rng = np.random.default_rng(7)
+        # build a payload larger than the 512-byte threshold
+        payload = bytes(rng.integers(0, 256, 4096, dtype=np.uint8))
+        comp = ws_protocol._maybe_compress(payload, enabled=True)
+        # large incompressible data should fall back to raw (no benefit)
+        assert comp == payload or comp[0:1] == b"Z"
+        dec = ws_protocol.decompress_if_needed(comp)
+        assert dec == payload
+
+    def test_compressible_data_actually_compresses(self):
+        payload = b"ABCDEFGHIJKLMNOP" * 512  # highly compressible, 8192 bytes
+        comp = ws_protocol._maybe_compress(payload, enabled=True)
+        assert comp[0:1] == b"Z"
+        assert len(comp) < len(payload)
+        # verify the exact original size is encoded in the header
+        orig_size = struct.unpack("<I", comp[1:5])[0]
+        assert orig_size == len(payload)
+        assert ws_protocol.decompress_if_needed(comp) == payload
+
+    def test_disabled_and_small_payloads_passthrough(self):
+        small = b"hello"
+        assert ws_protocol._maybe_compress(small, enabled=True) == small
+        big = b"A" * 2000
+        assert ws_protocol._maybe_compress(big, enabled=False) == big
+
+    def test_compressed_output_is_raw_deflate(self):
+        import zlib
+        payload = b"data-raw-deflate-check" * 64
+        comp = ws_protocol._maybe_compress(payload, enabled=True)
+        assert comp[0:1] == b"Z"
+        # raw DEFLATE must decompress with wbits=-15 (no zlib header)
+        inflated = zlib.decompress(comp[5:], wbits=-15)
+        assert inflated == payload
+
