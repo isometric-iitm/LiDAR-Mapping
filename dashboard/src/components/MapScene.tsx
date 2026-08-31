@@ -9,7 +9,7 @@ import { Html } from "@react-three/drei";
 import type { Cell, GridMeta } from "@/lib/types";
 import type { CellMap, CellPatch } from "@/lib/useMapStream";
 
-const MAX_INSTANCES = 130000;
+const MAX_INSTANCES = 500000;
 
 export type CellInfo = {
   i: number;

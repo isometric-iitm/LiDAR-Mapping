@@ -59,14 +59,14 @@ class TestSectorIndex:
 
 
 class TestNRingsAndNCells:
-    def test_n_rings_at_least_90(self, grid):
-        assert grid.n_rings >= 90
+    def test_n_rings_at_least_500(self, grid):
+        assert grid.n_rings >= 500
 
     def test_n_cells_equals_rings_times_theta(self, grid):
         assert grid.n_cells == grid.n_rings * grid.n_theta
 
-    def test_n_cells_around_65k(self, grid):
-        assert 50000 < grid.n_cells < 100000
+    def test_n_cells_around_370k(self, grid):
+        assert 350000 < grid.n_cells < 400000
 
     def test_derived_from_config(self, grid_cfg):
         g = LogPolarGrid(grid_cfg)
@@ -79,13 +79,13 @@ class TestNRingsAndNCells:
 
 
 class TestMemoryReport:
-    def test_grid_kb_under_5000(self, grid):
+    def test_grid_kb_under_20000(self, grid):
         mem = grid.memory_report()
-        assert mem["grid_kb"] < 5000
+        assert mem["grid_kb"] < 20000
 
-    def test_compression_ratio_over_100(self, grid):
+    def test_compression_ratio_over_10(self, grid):
         mem = grid.memory_report()
-        assert mem["compression_ratio"] > 100
+        assert mem["compression_ratio"] > 10
 
     def test_ring_width_near(self, grid):
         mem = grid.memory_report()
@@ -93,7 +93,7 @@ class TestMemoryReport:
 
     def test_ring_width_far_reasonable(self, grid):
         mem = grid.memory_report()
-        assert 0.5 < mem["ring_width_far_m"] < 10.0
+        assert 0.4 < mem["ring_width_far_m"] < 10.0
 
     def test_n_cells_matches(self, grid):
         mem = grid.memory_report()

@@ -13,15 +13,15 @@ class TestGridFixture:
         assert grid.r_min == pytest.approx(0.5)
         assert grid.r_max == pytest.approx(100.0)
         assert grid.dr_0 == pytest.approx(0.05)
-        assert grid.alpha == pytest.approx(1.05)
+        assert grid.alpha == pytest.approx(1.0045)
         assert grid.n_theta == 720
         assert grid.n_classes == 4
 
     def test_grid_memory_report(self, grid):
         mem = grid.memory_report()
         assert mem["grid_kb"] > 0
-        assert mem["grid_kb"] < 5000
-        assert mem["compression_ratio"] > 100
+        assert mem["grid_kb"] < 20000
+        assert mem["compression_ratio"] > 10
         assert mem["n_cells"] == grid.n_cells
 
 

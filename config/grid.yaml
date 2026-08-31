@@ -3,7 +3,7 @@ grid:
   r_min: 0.5          # inner dead zone radius (m); points closer are ignored for grid
   r_max: 100.0        # outer cutoff (m)
   dr_0: 0.05          # first ring radial width (m) — "5 cm near"
-  alpha: 1.05         # geometric growth factor of ring width
+  alpha: 1.0045       # geometric growth factor: 5cm (near) → ~50cm (far at 100 m)
   n_theta: 720        # angular sectors (0.5 deg each)
   z_min: -5.0         # elevation clamp (m) relative to sensor plane
   z_max: 10.0

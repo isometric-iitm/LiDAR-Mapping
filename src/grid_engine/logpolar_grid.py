@@ -57,7 +57,7 @@ class LogPolarGrid:
         self.n_cells = self.n_rings * self.n_theta
         self.ring_widths = self.dr_0 * (self.alpha ** np.arange(self.n_rings))
         self._ring_edges = np.concatenate([[self.r_min], self.r_min + np.cumsum(self.ring_widths)])
-        # ring i covers [_ring_edges[i], _ring_edges[i+1]); width dr_0 * alpha^i (grows 5cm -> ~50cm)
+        # ring i covers [_ring_edges[i], _ring_edges[i+1]); width dr_0 * alpha^i (grows 5cm -> ~50cm at 100 m)
 
         # state (struct-of-arrays) — AP0 precise: no temporal smoothing
         self.z_mean = np.zeros(self.n_cells, dtype=np.float32)

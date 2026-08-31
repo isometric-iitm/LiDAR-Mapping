@@ -61,12 +61,12 @@ Real-time semantic segmentation of LiDAR point clouds projected onto a **variabl
 
 </details>
 
-### Memory: ~7,200× compression
+### Memory: ~43× compression
 
 | Grid type | Cell size | Cell count | Memory |
 |-----------|-----------|------------|--------|
-| Uniform 5 cm | 0.05 m × 0.05 m | ~16 million | ~1,600 MB |
-| **Log-polar (ours)** | 5 cm → 50 cm | ~720K | **~220 KB** |
+| Uniform 5 cm | 0.05 m × 0.05 m | ~16 million | ~784 MB |
+| **Log-polar (ours)** | 5 cm → 50 cm | ~369K | **~17 MB** |
 
 ### Test hardware
 
@@ -191,7 +191,7 @@ pc2d/
 │   │   ├── lovasz.py         # CombinedLoss (CE + Lovasz-Softmax)
 │   │   └── predict.py        # Segmenter (end-to-end: project → forward → KNN)
 │   ├── grid_engine/
-│   │   └── logpolar_grid.py  # LogPolarGrid (~720K cells, ~220 KB, decay, delta)
+│   │   └── logpolar_grid.py  # LogPolarGrid (~369K cells, ~17 MB, decay, delta)
 │   └── server/
 │       ├── app.py            # FastAPI + Pipeline thread + WS endpoints
 │       └── ws_protocol.py    # Binary framing (magic 0x50433244)
@@ -214,19 +214,19 @@ pc2d/
 
 ## Variable-Resolution Grid
 
-The core innovation: ring width grows geometrically from **5 cm (near)** to **~50 cm (far)**, achieving dramatic memory savings while preserving fine detail where it matters most.
+The core innovation: ring width grows geometrically from **5 cm (near)** to **~50 cm (far at 100 m)**, achieving dramatic memory savings while preserving fine detail where it matters most.
 
 ### Ring geometry
 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
 | `dr_0` | 0.05 m | First ring width (5 cm) |
-| `alpha` | 1.05 | Geometric growth factor per ring |
+| `alpha` | 1.0045 | Geometric growth factor per ring |
 | `r_min` | 0.5 m | Inner dead zone |
 | `r_max` | 100 m | Outer cutoff |
 | `n_theta` | 720 | Angular sectors (0.5° each) |
-| Resulting rings | ~1,000 | dr_0 * α^i reaches r_max at i≈997 |
-| Resulting cells | ~720K | rings × sectors |
+| Resulting rings | ~512 | dr_0 * α^i cumulative reaches r_max at i≈512 |
+| Resulting cells | ~369K | rings × sectors |
 
 ### Temporal dynamics
 
