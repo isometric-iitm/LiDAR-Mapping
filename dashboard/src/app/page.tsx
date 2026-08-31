@@ -1,8 +1,11 @@
 "use client";
+/* eslint-disable react-hooks/immutability */
 
-import { useState } from "react";
-import { Canvas } from "@react-three/fiber";
-import { OrbitControls } from "@react-three/drei";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import * as THREE from "three";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { OrbitControls, OrthographicCamera, PerspectiveCamera } from "@react-three/drei";
+import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import MetricsPanel, { type ViewMode } from "@/components/MetricsPanel";
 import Timeline from "@/components/Timeline";
 import { CLASSES } from "@/lib/colors";
@@ -10,51 +13,132 @@ import {
   CellLayer,
   CloudComparisonView,
   CloudSegView,
+  GroundPlane,
+  PerfOverlay,
   RangeRings,
   EgoMarker,
-  GroundPlane,
-  FramePerf,
   type CellInfo,
 } from "@/components/MapScene";
 import { useMapStream } from "@/lib/useMapStream";
 
-const GRID_EDGES = (() => {
-  const r0 = 0.5;
-  const a = 1.05;
-  const d0 = 0.05;
-  const edges: number[] = [r0];
+type CamMode = "persp" | "ortho" | "top";
+
+function computeGridEdges(meta: { r_min: number; dr_0: number; alpha: number; n_rings: number }): number[] {
+  const { r_min, dr_0, alpha, n_rings } = meta;
+  const edges: number[] = [r_min];
   let cum = 0;
-  for (let k = 0; k < 95; k++) {
-    cum += d0 * a ** k;
-    edges.push(r0 + cum);
+  for (let k = 0; k < n_rings; k++) {
+    cum += dr_0 * alpha ** k;
+    edges.push(r_min + cum);
   }
   return edges;
-})();
+}
 
-function hoverInfo(cell: CellInfo): {
+function DemandInvalidator({ patch, camMode }: { patch: unknown; camMode: string }) {
+  const invalidate = useThree((s) => s.invalidate);
+  useEffect(() => {
+    invalidate();
+  }, [patch, camMode, invalidate]);
+  return null;
+}
+
+/** Smooth camera reset: lerps position + target each frame. */
+function CameraAnimator({ target, running, onDone }: { target: { pos: THREE.Vector3; look: THREE.Vector3 }; running: boolean; onDone: () => void }) {
+  const { camera } = useThree();
+  const elapsed = useRef(0);
+  const startPos = useRef(new THREE.Vector3());
+  const startLook = useRef(new THREE.Vector3());
+  const duration = 0.6; // seconds
+
+  useEffect(() => {
+    if (!running) return;
+    elapsed.current = 0;
+    startPos.current.copy(camera.position);
+    startLook.current.set(0, 0, 0);
+    // Try to get current target from controls
+    const oc = camera.userData.__orbitControls as OrbitControlsImpl | undefined;
+    if (oc) startLook.current.copy(oc.target);
+  }, [running, camera]);
+
+  useFrame((_, dt) => {
+    if (!running) return;
+    elapsed.current += dt;
+    const t = Math.min(1, elapsed.current / duration);
+    // Ease-out cubic
+    const e = 1 - Math.pow(1 - t, 3);
+    camera.position.lerpVectors(startPos.current, target.pos, e);
+    // Also smoothly move the orbit target
+    const oc = camera.userData.__orbitControls as OrbitControlsImpl | undefined;
+    if (oc) {
+      oc.target.lerpVectors(startLook.current, target.look, e);
+      oc.update();
+    }
+    if (t >= 1) onDone();
+  });
+
+  return null;
+}
+
+function OrthoAutoFit({ maxR }: { maxR: number }) {
+  const cam = useThree((s) => s.camera as THREE.OrthographicCamera | THREE.PerspectiveCamera);
+  const size = useThree((s) => s.size);
+  const invalidate = useThree((s) => s.invalidate);
+  useLayoutEffect(() => {
+    const o = cam as THREE.OrthographicCamera;
+    if (!o.isOrthographicCamera) return;
+    // Fit the full world diameter edge-to-edge to the viewport WIDTH.
+    // Subtract bottom overlay height (~70px) so the map doesn't tuck
+    // behind the timeline / mode label.
+    const bottomMargin = 70;
+    const worldDiameter = 2 * maxR;
+    const zoomW = size.width / worldDiameter;
+    const zoomH = (size.height - bottomMargin) / worldDiameter;
+    // Use whichever zoom is *larger* (shows more, so the map fits in both axes).
+    // Width-first for wide screens, height-first for tall.
+    const zoom = Math.min(zoomW, zoomH);
+    o.zoom = Math.max(0.5, zoom);
+    o.updateProjectionMatrix();
+    invalidate();
+  }, [size.width, size.height, maxR, cam, invalidate]);
+  return null;
+}
+
+function hoverInfo(cell: CellInfo, gridEdges: number[], nTheta: number): {
   cls: string;
+  clsColor: string;
   zMax: number;
   zMean: number;
   occ: number;
   dyn: number;
+  trav: number;
   r: number;
   deg: number;
+  cellWidth: string;
 } {
-  const rIn = GRID_EDGES[cell.i];
-  const rOut = GRID_EDGES[cell.i + 1] ?? GRID_EDGES[GRID_EDGES.length - 1];
+  const rIn = gridEdges[cell.i] ?? 0;
+  const rOut = gridEdges[cell.i + 1] ?? gridEdges[gridEdges.length - 1];
   const r = (rIn + rOut) / 2;
-  const deg = ((cell.j / 720) * 360 + 180) % 360;
+  const deg = ((cell.j / nTheta) * 360 + 180) % 360;
   const clsCls = CLASSES.find((c) => c.id === cell.cls);
+  const ringWidth = rOut - rIn;
+  const cellWidth = ringWidth < 0.1 ? `${(ringWidth * 100).toFixed(1)} cm` : `${ringWidth.toFixed(2)} m`;
   return {
     cls: clsCls?.label ?? "other",
+    clsColor: clsCls?.color ?? "#ffffff",
     zMax: cell.zMax,
     zMean: cell.zMean,
     occ: cell.occ,
     dyn: cell.dyn,
+    trav: cell.trav,
     r,
     deg,
+    cellWidth,
   };
 }
+
+type SeqInfo = { id: string; frames: number; has_poses: boolean; has_labels: boolean };
+
+const API = process.env.NEXT_PUBLIC_PC2D_API ?? "http://localhost:8000";
 
 export default function Home() {
   const {
@@ -70,19 +154,52 @@ export default function Home() {
     seeking,
     seekTo,
     send,
+    seqId,
+    switchSequence,
   } = useMapStream();
   const [paused, setPaused] = useState(true);
   const [speed, setSpeed] = useState(1);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [pointSize, setPointSize] = useState(2);
   const [hover, setHover] = useState<ReturnType<typeof hoverInfo> | null>(null);
+  const [camMode, setCamMode] = useState<CamMode>("persp");
+  const [animTarget, setAnimTarget] = useState<{ pos: THREE.Vector3; look: THREE.Vector3 } | null>(null);
+  const [availableSeqs, setAvailableSeqs] = useState<SeqInfo[]>([]);
 
   const maxR = meta?.r_max ?? 100;
+  const gridEdges = meta ? computeGridEdges(meta) : [];
+  const nTheta = meta?.n_theta ?? 720;
+
+  const resetNorth = () => {
+    const pos = camMode === "top"
+      ? new THREE.Vector3(0, 180, 0.01)
+      : new THREE.Vector3(0, 130, 95);
+    setAnimTarget({ pos, look: new THREE.Vector3(0, 0, 0) });
+  };
+
+  const onAnimDone = useCallback(() => setAnimTarget(null), []);
 
   const handlePause = (p: boolean) => {
     setPaused(p);
     send({ type: "control", action: p ? "pause" : "play" });
   };
+
+  // Space bar toggles play/pause (ignore when focus is in an input/select).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== "Space" || e.repeat) return;
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      e.preventDefault();
+      setPaused((prev) => {
+        const next = !prev;
+        send({ type: "control", action: next ? "pause" : "play" });
+        return next;
+      });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [send]);
 
   const handleSpeed = (s: number) => {
     setSpeed(s);
@@ -98,34 +215,54 @@ export default function Home() {
     else if (!needsCloud && cloudOn) setCloudOn(false);
   };
 
+  useEffect(() => {
+    fetch(`${API}/sequences`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText)))
+      .then((data) => setAvailableSeqs(data.sequences ?? []))
+      .catch(() => {});
+  }, []);
+
   const showCloud = viewMode === "seg" || viewMode === "raw" || viewMode === "compare";
   const gridOpacity = viewMode === "compare" ? 0.35 : 1;
+  const showGrid = viewMode === "grid" || viewMode === "compare" || viewMode === "trav";
 
   return (
-    <div className="flex h-screen flex-col bg-zinc-950 text-zinc-100">
+    <div className="flex h-dvh flex-col overflow-hidden bg-black text-zinc-100">
       <div className="flex min-h-0 flex-1">
         <div className="relative min-w-0 flex-1">
           <Canvas
-            camera={{ position: [0, 130, 95], fov: 45, near: 0.1, far: 1000 }}
+            frameloop="always"
             dpr={[1, 2]}
+            onCreated={({ gl }) => {
+              gl.toneMappingExposure = 1;
+            }}
           >
-            <color attach="background" args={["#0b0b0e"]} />
+            {/* Camera rig: perspective (angled 3D), ortho (angled 3D), top (2D). */}
+            {camMode === "ortho" ? (
+              <OrthographicCamera key="cam-ortho" makeDefault position={[0, 130, 95]} zoom={2.5} near={0.1} far={1000} />
+            ) : camMode === "top" ? (
+              <OrthographicCamera key="cam-top" makeDefault position={[0, 180, 0.01]} zoom={2.5} near={0.1} far={1000} />
+            ) : (
+              <PerspectiveCamera key="cam-persp" makeDefault position={[0, 130, 95]} fov={45} near={0.1} far={1000} />
+            )}
+            {(camMode === "ortho" || camMode === "top") && <OrthoAutoFit maxR={maxR} />}
+            <color attach="background" args={["#000000"]} />
             <ambientLight intensity={0.7} />
             <directionalLight position={[60, 120, 40]} intensity={1.4} />
             <GroundPlane maxR={maxR} />
             <RangeRings maxR={maxR} />
-            <FramePerf />
             {/* heading-up: the grid/cloud are refreshed in the CURRENT ego
                 frame every tick, so a fixed +90deg puts the ego's forward
                 (+X scene axis) at the top of the screen permanently. */}
             <group rotation={[0, Math.PI / 2, 0]}>
-              {(viewMode === "grid" || viewMode === "compare") && (
+              {showGrid && (
                 <CellLayer
                   cells={cells}
                   meta={meta}
                   patch={patch}
-                  onHover={viewMode === "grid" ? (i) => setHover(i ? hoverInfo(i) : null) : undefined}
+                  onHover={(i) => setHover(i ? hoverInfo(i, gridEdges, nTheta) : null)}
                   opacity={gridOpacity}
+                  travMode={viewMode === "trav"}
                 />
               )}
               {showCloud &&
@@ -137,44 +274,97 @@ export default function Home() {
               <EgoMarker />
             </group>
             <OrbitControls
+              key={`oc-${camMode}`}
+              ref={(r) => {
+                if (r) (r.object as THREE.Camera).userData.__orbitControls = r;
+              }}
               makeDefault
               target={[0, 0, 0]}
-              minDistance={30}
-              maxDistance={260}
+              minDistance={10}
+              maxDistance={300}
               enablePan
-              maxPolarAngle={Math.PI / 2.05}
+              maxPolarAngle={camMode === "top" ? Math.PI / 2.001 : Math.PI / 2.05}
+              minPolarAngle={camMode === "top" ? 0 : undefined}
+              minZoom={0.3}
+              maxZoom={12}
             />
+            <PerfOverlay />
+            <DemandInvalidator patch={patch} camMode={camMode} />
+            {animTarget && (
+              <CameraAnimator
+                target={animTarget}
+                running={!!animTarget}
+                onDone={onAnimDone}
+              />
+            )}
           </Canvas>
 
-          <div className="pointer-events-none absolute bottom-4 left-4 rounded-md bg-zinc-900/80 px-3 py-2 text-xs text-zinc-400 backdrop-blur">
+          {/* ── HUD top chrome: legend (left) · camera controls (right) ───── */}
+          <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-3">
+            <div className="frost pointer-events-none px-3 py-2">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                {viewMode === "trav" ? (
+                  <>
+                    <LegendSwatch color="#22c55e" label="Drivable" />
+                    <LegendSwatch color="#f59e0b" label="Caution" />
+                    <LegendSwatch color="#ef4444" label="Blocked" />
+                  </>
+                ) : (
+                  CLASSES.map((c) => <LegendSwatch key={c.id} color={c.color} label={c.label} />)
+                )}
+              </div>
+            </div>
+
+            <div className="frost pointer-events-auto flex items-center gap-1.5 p-1">
+              {(["persp", "ortho", "top"] as CamMode[]).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setCamMode(m)}
+                  className={`rounded-[2.5px] px-2.5 py-1 text-xs font-medium transition-colors ${
+                    camMode === m ? "bg-cyan-500/20 text-white ring-1 ring-cyan-400/50" : "text-zinc-400 hover:bg-white/10 hover:text-zinc-200"
+                  }`}
+                  title={m === "persp" ? "Perspective 3D" : m === "ortho" ? "Orthographic 3D" : "Top-down 2D"}
+                >
+                  {m === "persp" ? "3D" : m === "ortho" ? "Ortho" : "Top"}
+                </button>
+              ))}
+              <div className="mx-0.5 h-4 w-px bg-white/15" />
+              <button
+                onClick={resetNorth}
+                className="rounded-[2.5px] px-2.5 py-1 text-xs font-medium text-zinc-400 transition-colors hover:bg-white/10 hover:text-zinc-200"
+                title="Reset to north-up"
+              >
+                N↑
+              </button>
+            </div>
+          </div>
+
+          {/* ── bottom-left: current mode + grid size ─────────────────── */}
+          <div className="frost pointer-events-none absolute bottom-4 left-4 px-4 py-2 text-xs text-zinc-400">
             <span className="font-semibold text-zinc-200">
               {viewMode === "grid"
                 ? "2.5D grid"
-                : viewMode === "seg"
+                : viewMode === "trav"
+                  ? "traversability"
+                  : viewMode === "seg"
                   ? "segmented cloud"
                   : viewMode === "raw"
                     ? "raw point cloud"
                     : "raw cloud over grid"}
             </span>
             {meta ? (
-              <span className="ml-2 font-mono">
+              <span className="hud-val ml-2">
                 {meta.n_rings} × {meta.n_theta}
               </span>
             ) : null}
             {showCloud && cloud ? (
-              <span className="ml-2 font-mono text-zinc-500">{(cloud.xyz.length / 3).toLocaleString()} pts</span>
+              <span className="hud-val ml-2 text-zinc-500">{(cloud.xyz.length / 3).toLocaleString()} pts</span>
             ) : null}
-          </div>
-
-          <div className="pointer-events-none absolute left-4 top-4 rounded-md bg-zinc-900/80 px-3 py-2 text-xs backdrop-blur">
-            <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
-              {CLASSES.map((c) => (
-                <div key={c.id} className="flex items-center gap-1.5">
-                  <span className="h-2.5 w-2.5 rounded-[3px]" style={{ background: c.color }} />
-                  <span className="text-[11px] leading-none text-zinc-300">{c.label}</span>
-                </div>
-              ))}
-            </div>
+            {viewMode === "compare" && stats ? (
+              <div className="hud-cap mt-1 text-cyan-400/90">
+                {stats.compression_ratio.toLocaleString()}× fewer cells than uniform 5 cm grid
+              </div>
+            ) : null}
           </div>
 
           <Timeline
@@ -183,9 +373,12 @@ export default function Home() {
             paused={paused}
             speed={speed}
             seeking={seeking}
+            seqId={seqId}
+            availableSeqs={availableSeqs}
             onPause={handlePause}
             onSeek={handleSeek}
             onSpeed={handleSpeed}
+            onSwitchSeq={switchSequence}
           />
         </div>
 
@@ -200,6 +393,15 @@ export default function Home() {
           hover={hover}
         />
       </div>
+    </div>
+  );
+}
+
+function LegendSwatch({ color, label }: { color: string; label: string }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="h-2.5 w-2.5 rounded-full" style={{ background: color }} />
+      <span className="text-xs leading-none text-zinc-300">{label}</span>
     </div>
   );
 }

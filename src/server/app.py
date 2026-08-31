@@ -9,7 +9,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import numpy as np
-import yaml
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -24,17 +23,34 @@ class Pipeline:
     """Background thread: replayer -> segmenter -> grid. Produces WS message dicts."""
 
     def __init__(self, cfg: dict):
+        from src.common.config import resolve_path
         self.cfg = cfg
         src = cfg["source"]
         mdl = cfg["model"]
+        # seq_dir and checkpoint may be relative to the repo root — resolve them
+        # so we don't depend on the process CWD.
+        seq_dir = resolve_path(src["seq_dir"])
+        self.seq_base_dir = seq_dir.parent
+        self.seq_id = seq_dir.name
+        checkpoint = resolve_path(mdl["checkpoint"])
         self.replayer = SemanticKITTIReplayer(
-            src["seq_dir"], playback_speed=src["playback_speed"], loop=src["loop"]
+            seq_dir, playback_speed=src["playback_speed"], loop=src["loop"]
         )
-        self.segmenter = Segmenter(mdl["checkpoint"], h=mdl["h"], w=mdl["w"])
+        self.segmenter = Segmenter(
+            checkpoint,
+            h=mdl["h"],
+            w=mdl["w"],
+            device=mdl.get("device", "auto"),
+            precision=mdl.get("precision", "fp16"),
+        )
         self.grid = LogPolarGrid()
         self.grid_lock = threading.Lock()
-        self.messages: queue.Queue = queue.Queue(maxsize=120)
+        # Larger queue; precise mode drops intermediate snapshots (coalesce) so
+        # 10Hz snapshots don't overflow when dashboard is briefly slow.
+        self.messages: queue.Queue = queue.Queue(maxsize=32)
         self.pause_event = threading.Event()
+        self._frames_emitted = 0
+        self._frames_dropped = 0
         # start paused: the dashboard must explicitly press Play (auto-play
         # off on page load). Seek previews still render one frame while paused.
         self.speed = float(src["playback_speed"])
@@ -44,7 +60,11 @@ class Pipeline:
         self._last_stats_frame = 0
         self._frame_time_window = []
         self._stage_window = {"seg": [], "grid": [], "pack": [], "cloud": []}
+        self._project_window = []
+        self._forward_window = []
         self._mem = None
+        self._perf_n = 0
+        self._perf_sum = {"seg": 0.0, "grid": 0.0, "pack": 0.0, "proc": 0.0}
         self.cloud_on = False
         self.cloud_max = int(self.cfg["server"].get("cloud_points_max", 30000))
         self._snap_iv = int(self.cfg["server"].get("snapshot_interval_frames", 20))
@@ -53,9 +73,10 @@ class Pipeline:
         # rolling world-frame cloud history (for the ego-anchored accumulation view)
         self.cloud_history_frames = int(self.cfg["server"].get("cloud_history_frames", 30))
         self._cloud_hist: deque = deque(maxlen=self.cloud_history_frames)
-        self._pose_mats = _load_pose_mats(src["seq_dir"])
+        self._pose_mats = _load_pose_mats(seq_dir)
         self.epoch = 0  # bumped on seek so clients can drop stale in-flight frames
         self._seek_lock = threading.Lock()
+        self._replayer_lock = threading.Lock()
         self._preview = False  # process exactly one frame on the next loop pass
 
     def start(self):
@@ -111,6 +132,52 @@ class Pipeline:
         with self._seek_lock:
             self._preview = True
 
+    def switch_sequence(self, seq_id: str):
+        """Swap the replayer to a different SemanticKITTI sequence.
+
+        Similar to seek() but also rebuilds the replayer and pose mats for the
+        new sequence directory. The pipeline is paused during the swap so the
+        background thread doesn't read a half-initialised replayer.
+        """
+        new_dir = self.seq_base_dir / seq_id
+        if not (new_dir / "velodyne").exists():
+            print(f"[pipeline] switch_sequence: {new_dir}/velodyne not found, ignoring")
+            return
+        was_paused = not self.pause_event.is_set()
+        self.pause_event.clear()
+        time.sleep(0.05)
+        with self._replayer_lock:
+            with self.grid_lock:
+                self.grid.reset()
+                self._last_snapshot_frame = self.grid.frame - self._snap_iv
+                self._last_stats_frame = self.grid.frame - self._stats_iv
+                self._mem = None
+            self.replayer = SemanticKITTIReplayer(
+                new_dir,
+                playback_speed=self.speed,
+                loop=self.cfg["source"]["loop"],
+            )
+            self._pose_mats = _load_pose_mats(new_dir)
+            self.seq_id = seq_id
+        self._cloud_hist.clear()
+        self._frame_time_window.clear()
+        for buf in self._stage_window.values():
+            buf.clear()
+        self._frames_emitted = 0
+        self._frames_dropped = 0
+        self._perf_n = 0
+        self._perf_sum = {"seg": 0.0, "grid": 0.0, "pack": 0.0, "proc": 0.0}
+        while True:
+            try:
+                self.messages.get_nowait()
+            except queue.Empty:
+                break
+        self.epoch += 1
+        with self._seek_lock:
+            self._preview = True
+        if not was_paused:
+            self.pause_event.set()
+
     def _take_preview(self) -> bool:
         with self._seek_lock:
             v = self._preview
@@ -120,13 +187,39 @@ class Pipeline:
     def _emit(self, payload, kind: str = "text"):
         """Queue a broadcast payload. kind='text' -> JSON dict, 'binary' -> bytes frame."""
         item = ("T", payload) if kind == "text" else ("B", payload)
+        # In precise mode every frame is a full snapshot (large). Instead of
+        # dropping just the oldest entry and still overflowing next put, coalesce:
+        # keep only the latest binary frame so we never lag (text stats/ack preserved).
+        is_binary = (kind != "text")
         try:
             self.messages.put_nowait(item)
+            self._frames_emitted += 1
         except queue.Full:
-            self._drop_oldest()
+            if is_binary:
+                # Drain all queued binary frames, keep only text (stats/ack) if any
+                kept: list = []
+                while True:
+                    try:
+                        q = self.messages.get_nowait()
+                        if q[0] == "T":
+                            kept.append(q)
+                        else:
+                            self._frames_dropped += 1
+                    except queue.Empty:
+                        break
+                for k in kept:
+                    try:
+                        self.messages.put_nowait(k)
+                    except queue.Full:
+                        break
+            else:
+                self._drop_oldest()
+                self._frames_dropped += 1
             try:
                 self.messages.put_nowait(item)
+                self._frames_emitted += 1
             except queue.Full:
+                self._frames_dropped += 1
                 pass
 
     def _loop(self):
@@ -144,13 +237,15 @@ class Pipeline:
     def _loop_step(self, stats_iv: int, snap_iv: int):
         # A seek preview must render even while paused: check before blocking.
         if self._take_preview():
-            frame = self.replayer.get(timeout=2.0)
+            with self._replayer_lock:
+                frame = self.replayer.get(timeout=2.0)
             if frame is not None:
                 self._process_frame(frame, stats_iv, snap_iv)
             return
         if not self.pause_event.wait(timeout=0.25):
             return  # paused: retry at the top of the loop (still sees seeks)
-        frame = self.replayer.get(timeout=2.0)
+        with self._replayer_lock:
+            frame = self.replayer.get(timeout=2.0)
         if frame is None:
             time.sleep(0.05)
             return
@@ -164,7 +259,13 @@ class Pipeline:
         stats_msg = None
         with self.grid_lock:
             self.grid.update(frame.points, cls4)
-            if self.grid.frame - self._last_snapshot_frame >= snap_iv:
+            # precise (no-decay) mode: every frame is a full snapshot so client never holds stale cells
+            # until the next incremental snapshot — eliminates the "older stays until new comes" ghost.
+            if not self.grid.decay_enabled:
+                snap = self.grid.snapshot()
+                is_snap = True
+                self._last_snapshot_frame = self.grid.frame
+            elif self.grid.frame - self._last_snapshot_frame >= snap_iv:
                 snap = self.grid.snapshot()
                 is_snap = True
                 self._last_snapshot_frame = self.grid.frame
@@ -172,8 +273,8 @@ class Pipeline:
                 snap = self.grid.delta()
                 is_snap = False
             if self.grid.frame - self._last_stats_frame >= stats_iv:
-                if self._mem is None:
-                    self._mem = self.grid.memory_report()
+                # Recompute every interval so rendered KB / compression reflect live scene (was cached static)
+                self._mem = self.grid.memory_report()
                 stats = self._compute_stats(self._mem)
                 self._last_stats_frame = self.grid.frame
                 stats_msg = ws_protocol.stats_message(stats)
@@ -208,14 +309,42 @@ class Pipeline:
         self._stage_window["grid"].append(grid_ms)
         self._stage_window["pack"].append(pack_ms)
         self._stage_window["cloud"].append(cloud_ms)
+        self._project_window.append(timings.get("project", 0.0))
+        self._forward_window.append(timings.get("forward", 0.0))
         self._frame_time_window.append(proc_ms)
         for buf in (self._stage_window["seg"], self._stage_window["grid"],
                     self._stage_window["pack"], self._stage_window["cloud"],
+                    self._project_window, self._forward_window,
                     self._frame_time_window):
             if len(buf) > 100:
                 buf.pop(0)
 
-        if proc_ms > 400.0:
+        # detailed perf log every 30 frames (and on any slow frame)
+        self._perf_n += 1
+        self._perf_sum["seg"] += timings.get('total', 0.0)
+        self._perf_sum["grid"] += grid_ms
+        self._perf_sum["pack"] += pack_ms
+        self._perf_sum["proc"] += proc_ms
+        if self._perf_n >= 30 or proc_ms > 400.0:
+            n = self._perf_n
+            avg = {k: v / n for k, v in self._perf_sum.items()}
+            qd = self.messages.qsize()
+            try:
+                sr = snap["rows"]
+                tot = int(sr.shape[0])
+                if tot:
+                    js = sr[:, 1]  # sector j
+                    behind = int(np.count_nonzero((js < 90) | (js > 630)))
+                    front = tot - behind
+                else:
+                    behind = front = 0
+                    tot = 0
+            except:
+                tot = behind = front = -1
+            print(f"[perf] avg{n} seg={avg['seg']:.1f}ms grid={avg['grid']:.1f}ms pack={avg['pack']:.1f}ms proc={avg['proc']:.1f}ms q={qd} drop={self._frames_dropped} rendered={tot} front={front} behind={behind}")
+            self._perf_n = 0
+            self._perf_sum = {"seg": 0.0, "grid": 0.0, "pack": 0.0, "proc": 0.0}
+        elif proc_ms > 400.0:
             print(f"[slow] frame {self.grid.frame}: seg={timings.get('total', 0.0):.0f}ms "
                   f"grid={grid_ms:.1f}ms pack={pack_ms:.1f}ms cloud={cloud_ms:.1f}ms "
                   f"n_cells={self._mem['n_cells'] if self._mem else 0}")
@@ -290,12 +419,18 @@ class Pipeline:
             "grid_ms": stages["grid"],
             "pack_ms": stages["pack"],
             "cloud_ms": stages["cloud"],
-            "grid_mem_kb": mem["grid_kb"],
+            "project_ms": round(float(np.mean(self._project_window)), 1) if self._project_window else 0.0,
+            "forward_ms": round(float(np.mean(self._forward_window)), 1) if self._forward_window else 0.0,
+            "grid_mem_kb": mem.get("rendered_kb", mem["grid_kb"]),
             "uniform_equiv_mb": mem["uniform_mb"],
             "compression_ratio": mem["compression_ratio"],
+            "capacity_compression": mem.get("capacity_compression", mem["compression_ratio"]),
+            "rendered_cells": mem.get("rendered_cells", 0),
             "n_cells": mem["n_cells"],
             "seq_pos": self.replayer.i,
             "seq_len": len(self.replayer),
+            "frames_emitted": self._frames_emitted,
+            "frames_dropped": self._frames_dropped,
         }
 
 
@@ -329,9 +464,8 @@ def _load_pose_mats(seq_dir: str | Path) -> np.ndarray | None:
 
 
 def load_pipeline_config() -> dict:
-    path = Path(__file__).resolve().parent.parent.parent / "config" / "pipeline.yaml"
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
+    from src.common.config import load_config
+    return load_config("pipeline")
 
 
 def load_history(ckpt_dir: str | Path) -> list[dict]:
@@ -401,9 +535,14 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.get("/health")
     async def health():
+        from src.common.config import resolve_path
+        ckpt = resolve_path(cfg["model"]["checkpoint"])
         return {"status": "ok", "n_rings": pipeline.grid.n_rings,
                 "n_theta": pipeline.grid.n_theta,
-                "frame": pipeline.grid.frame}
+                "frame": pipeline.grid.frame,
+                "device": str(pipeline.segmenter.device),
+                "precision": pipeline.segmenter.precision,
+                "checkpoint_exists": Path(str(ckpt)).is_file()}
 
     @app.get("/snapshot")
     async def snapshot():
@@ -412,17 +551,48 @@ def create_app(cfg: dict | None = None) -> FastAPI:
 
     @app.get("/metrics/history")
     async def metrics_history():
-        return load_history(cfg["server"]["ckpt_dir"])
+        from src.common.config import resolve_path
+        return load_history(resolve_path(cfg["server"]["ckpt_dir"]))
 
     @app.get("/metrics/memory")
     async def metrics_memory():
         return pipeline.grid.memory_report()
+
+    @app.get("/metrics/eval")
+    async def metrics_eval():
+        from src.common.config import repo_root
+        results_dir = repo_root() / "results"
+        jsons = sorted(results_dir.glob("eval_*.json"))
+        if not jsons:
+            return {"error": "no eval results found"}
+        with open(jsons[-1], encoding="utf-8") as f:
+            return json.load(f)
+
+    @app.get("/sequences")
+    async def list_sequences():
+        base = pipeline.seq_base_dir
+        seqs = []
+        if base.is_dir():
+            for d in sorted(base.iterdir()):
+                if d.is_dir() and (d / "velodyne").is_dir():
+                    n_bins = len(list((d / "velodyne").glob("*.bin")))
+                    has_poses = (d / "poses.txt").is_file()
+                    has_labels = (d / "labels").is_dir()
+                    seqs.append({
+                        "id": d.name,
+                        "frames": n_bins,
+                        "has_poses": has_poses,
+                        "has_labels": has_labels,
+                    })
+        return {"current": pipeline.seq_id, "sequences": seqs}
 
     @app.websocket("/ws/map")
     async def ws_map(ws: WebSocket):
         await ws.accept()
         connections.add(ws)
         meta = ws_protocol.grid_meta_message(pipeline.grid)
+        meta["seq_id"] = pipeline.seq_id
+        meta["seq_len"] = len(pipeline.replayer)
         await ws.send_text(json.dumps(meta))
         try:
             while True:
@@ -453,6 +623,16 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                         await ws.send_text(json.dumps({
                             "type": "control_ack", "action": "seek",
                             "frame": pipeline.grid.frame, "idx": pipeline.replayer.i,
+                            "epoch": pipeline.epoch}))
+                    elif action == "switch_sequence":
+                        seq_id = data.get("value", "")
+                        print(f"[ws] switch_sequence -> {seq_id}")
+                        pipeline.switch_sequence(seq_id)
+                        await ws.send_text(json.dumps({
+                            "type": "control_ack", "action": "switch_sequence",
+                            "seq_id": pipeline.seq_id,
+                            "seq_len": len(pipeline.replayer),
+                            "frame": pipeline.grid.frame,
                             "epoch": pipeline.epoch}))
                 elif data.get("type") == "request_snapshot":
                     with pipeline.grid_lock:

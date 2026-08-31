@@ -1,3 +1,4 @@
+import os
 import time
 from pathlib import Path
 
@@ -30,6 +31,7 @@ class Segmenter:
         fov_bottom_deg: float = -24.8,
         max_range: float = 80.0,
         device: str | None = None,
+        precision: str | None = None,
     ):
         self.h = h
         self.w = w
@@ -38,9 +40,9 @@ class Segmenter:
         self.max_range = max_range
         self.num_classes = num_classes
 
-        if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.device = torch.device(device)
+        from src.common.config import resolve_device, resolve_precision
+        self.precision = resolve_precision(precision)
+        self.device = torch.device(resolve_device(device))
 
         self.model = RangeImageUNet(
             in_channels=in_channels,
@@ -49,10 +51,24 @@ class Segmenter:
             use_groupnorm=use_groupnorm,
             groups=groups,
         )
-        ckpt = torch.load(str(checkpoint), map_location=self.device, weights_only=False)
+        from src.common.config import resolve_path
+        # Env override (highest priority) lets a machine point the segmenter at
+        # its own checkpoint without touching config; falls back to the passed arg.
+        checkpoint = os.getenv("PC2D_CHECKPOINT", "") or checkpoint
+        ckpt_path = resolve_path(checkpoint)
+        ckpt = torch.load(str(ckpt_path), map_location=self.device, weights_only=False)
         self.model.load_state_dict(ckpt["model_state_dict"])
         self.model.to(self.device).eval()
-        print(f"[Segmenter] loaded {checkpoint} (best_miou={ckpt.get('best_miou', 'n/a'):.4f}) on {self.device}")
+
+        # fp16: cast weights to half on CUDA (halves memory + uses tensor-core math).
+        if self.device.type == "cuda" and self.precision == "fp16":
+            self.model.half()
+
+        # torch.compile: only on CUDA and torch >= 2.0.
+        if self.device.type == "cuda" and torch.__version__.split(".")[0] == "2":
+            self.model = torch.compile(self.model)
+
+        print(f"[Segmenter] loaded {ckpt_path} (best_miou={ckpt.get('best_miou', 'n/a'):.4f}) on {self.device} precision={self.precision}")
 
     @torch.inference_mode()
     def segment(self, points: np.ndarray) -> tuple[np.ndarray, dict]:
@@ -83,7 +99,7 @@ class Segmenter:
         t1 = time.perf_counter()
         t["project"] = (t1 - t0) * 1000.0
 
-        with torch.amp.autocast("cuda", enabled=(self.device.type == "cuda")):
+        with torch.amp.autocast("cuda", enabled=(self.device.type == "cuda" and self.precision == "fp16")):
             logits = self.model(ri_t)
             probs = torch.softmax(logits.float(), dim=1)
             # 3x3 neighbour gather -> per-point probabilities (knn_project_back)

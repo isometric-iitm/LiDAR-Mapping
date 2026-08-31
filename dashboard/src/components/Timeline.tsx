@@ -2,15 +2,20 @@
 
 import { useRef, useState } from "react";
 
+type SeqInfo = { id: string; frames: number; has_poses: boolean; has_labels: boolean };
+
 type Props = {
   seqPos: number;
   seqLen: number;
   paused: boolean;
   speed: number;
   seeking: boolean;
+  seqId: string;
+  availableSeqs: SeqInfo[];
   onPause: (p: boolean) => void;
   onSeek: (idx: number) => void;
   onSpeed: (s: number) => void;
+  onSwitchSeq: (seqId: string) => void;
 };
 
 const fmt = (sec: number) => {
@@ -19,13 +24,14 @@ const fmt = (sec: number) => {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 };
 
-const SPEEDS = [0.5, 1, 2, 5];
+const SPEEDS = [0.5, 1, 2, 4];
 
-export default function Timeline({ seqPos, seqLen, paused, speed, seeking, onPause, onSeek, onSpeed }: Props) {
+export default function Timeline({ seqPos, seqLen, paused, speed, seeking, seqId, availableSeqs, onPause, onSeek, onSpeed, onSwitchSeq }: Props) {
   const [dragging, setDragging] = useState(false);
   const [scrubFrac, setScrubFrac] = useState<number | null>(null);
   const trackRef = useRef<HTMLDivElement>(null);
   const lastSend = useRef(0);
+  const lastCommittedFrac = useRef(-1);
 
   const frac = seqLen > 0 ? Math.min(1, Math.max(0, seqPos / seqLen)) : 0;
   const shown = dragging && scrubFrac !== null ? scrubFrac : frac;
@@ -40,16 +46,18 @@ export default function Timeline({ seqPos, seqLen, paused, speed, seeking, onPau
   };
 
   const commitSeek = (f: number) => {
+    if (lastCommittedFrac.current >= 0 && Math.abs(f - lastCommittedFrac.current) < 0.005) return;
+    lastCommittedFrac.current = f;
     const idx = Math.max(0, Math.min(seqLen - 1, Math.round(f * (seqLen - 1))));
     onSeek(idx);
   };
 
   return (
-    <div className="pointer-events-auto absolute bottom-4 left-1/2 flex w-[min(720px,94%)] -translate-x-1/2 items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/90 px-4 py-2 text-xs text-zinc-200 shadow-lg shadow-black/40 backdrop-blur">
+    <div className="frost pointer-events-auto absolute inset-x-0 bottom-4 mx-auto flex w-[min(720px,94%)] items-center gap-3 px-4 py-2 text-xs text-zinc-200">
       <button
         onClick={() => onPause(!paused)}
         disabled={seeking}
-        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-zinc-800 text-zinc-200 transition-colors hover:bg-zinc-700 disabled:cursor-wait disabled:opacity-60"
+        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-800 text-zinc-200 transition-colors hover:bg-zinc-700 disabled:cursor-wait disabled:opacity-60"
         title={seeking ? "Loading…" : paused ? "Resume playback" : "Freeze playback"}
       >
         {seeking ? (
@@ -119,9 +127,22 @@ export default function Timeline({ seqPos, seqLen, paused, speed, seeking, onPau
         {seeking ? "loading" : `${shownPos.toLocaleString()} / ${seqLen.toLocaleString()}`}
       </div>
       <select
+        value={seqId}
+        onChange={(e) => onSwitchSeq(e.target.value)}
+        disabled={seeking}
+        className="shrink-0 rounded-lg bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-300 outline-none transition-colors hover:bg-zinc-700 focus:ring-1 focus:ring-zinc-500 disabled:cursor-wait disabled:opacity-60"
+        title="Sequence"
+      >
+        {availableSeqs.map((s) => (
+          <option key={s.id} value={s.id}>
+            Seq {s.id}
+          </option>
+        ))}
+      </select>
+      <select
         value={speed}
         onChange={(e) => onSpeed(Number(e.target.value))}
-        className="shrink-0 rounded-md bg-zinc-800 px-1.5 py-1 font-mono text-[11px] text-zinc-300 outline-none transition-colors hover:bg-zinc-700 focus:ring-1 focus:ring-zinc-500"
+        className="shrink-0 rounded-lg bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-300 outline-none transition-colors hover:bg-zinc-700 focus:ring-1 focus:ring-zinc-500"
         title="Playback speed"
       >
         {SPEEDS.map((s) => (

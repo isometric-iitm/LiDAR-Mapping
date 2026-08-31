@@ -7,10 +7,16 @@ requires-python = ">=3.14"
 dependencies = [
   "fastapi>=0.141.1",
   "numpy>=2.5.2",
+  "onnx>=1.16.0",
+  "onnxruntime>=1.18.0",
+  "onnxscript>=0.1.0",
+  "matplotlib>=3.8.0",
+  "python-dotenv>=1.0.0",
   "pyyaml>=6.0.3",
   "scipy>=1.18.1",
   "torch>=2.11.0",
   "torchvision>=0.26.0",
+  "triton-windows>=3.8,<3.9; sys_platform == 'win32'",
   "uvicorn[standard]>=0.52.4",
   "webdataset>=1.0.2",
 ]
@@ -27,3 +33,11 @@ torchvision = [
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

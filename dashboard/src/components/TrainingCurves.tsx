@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import {
   CartesianGrid,
@@ -65,7 +66,7 @@ function ChartTooltip({
 
 function MetricChart({ title, rows }: { title: string; rows: Record<string, number | undefined>[] }) {
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
+    <div className="frost p-4">
       <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">{title}</h3>
       <div className="h-[290px]">
         <ResponsiveContainer width="100%" height="100%">
@@ -112,7 +113,7 @@ function MetricChart({ title, rows }: { title: string; rows: Record<string, numb
 
 function PerClassChart({ rows }: { rows: Record<string, number | undefined>[] }) {
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
+    <div className="frost p-4">
       <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-zinc-500">
         Per-class IoU (binned 4-class)
       </h3>
@@ -195,9 +196,9 @@ export default function TrainingCurves() {
     <div className="mx-auto max-w-6xl space-y-6 p-6">
       <header>
         <p className="mb-2 text-xs text-zinc-500">
-          <a href="/" className="text-zinc-400 transition-colors hover:text-zinc-200">
+          <Link href="/" className="text-zinc-400 transition-colors hover:text-zinc-200">
             ← Live map
-          </a>
+          </Link>
         </p>
         <h1 className="text-xl font-semibold">Training curves</h1>
         <p className="mt-1 text-sm text-zinc-500">
@@ -213,7 +214,7 @@ export default function TrainingCurves() {
 
       <MetricChart title="Training metrics vs step" rows={metricRows} />
       <PerClassChart rows={perClassRows} />
-      <p className="text-center text-[10px] text-zinc-600">
+      <p className="hud-cap text-center">
         Hover for exact values · click legend entries to toggle series
       </p>
     </div>
@@ -222,8 +223,8 @@ export default function TrainingCurves() {
 
 function MetricCard({ label, value, sub }: { label: string; value: string; sub: string }) {
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
-      <div className="text-[10px] uppercase tracking-wider text-zinc-500">{label}</div>
+    <div className="frost p-4">
+      <div className="hud-cap">{label}</div>
       <div className="mt-1 truncate font-mono text-sm text-zinc-100">{value}</div>
       <div className="text-xs text-zinc-500">{sub}</div>
     </div>

@@ -1,9 +1,11 @@
 "use client";
+/* eslint-disable react-hooks/immutability */
 
+import { useFrame, useThree } from "@react-three/fiber";
 import { useLayoutEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
-import { useFrame, useThree } from "@react-three/fiber";
 import { CLASS_COLOR } from "@/lib/colors";
+import { Html } from "@react-three/drei";
 import type { Cell, GridMeta } from "@/lib/types";
 import type { CellMap, CellPatch } from "@/lib/useMapStream";
 
@@ -17,6 +19,7 @@ export type CellInfo = {
   cls: number;
   occ: number;
   dyn: number;
+  trav: number;
   pos: [number, number, number];
 };
 
@@ -53,12 +56,14 @@ function InstancedCells({
   patch,
   onHover,
   opacity = 1,
+  travMode = false,
 }: {
   cells: CellMap;
   meta: GridMeta | null;
   patch: CellPatch | null;
   onHover?: (info: CellInfo | null) => void;
   opacity?: number;
+  travMode?: boolean;
 }) {
   const ref = useRef<THREE.InstancedMesh>(null);
   const cache = useRef<SlotCache | null>(null);
@@ -108,7 +113,7 @@ function InstancedCells({
 
     const clearAll = () => {
       for (const slot of c.slotOf.values()) {
-        t.p.set(0, 0, 0);
+        t.p.set(0, -1000, 0);
         t.s.set(0, 0, 0);
         t.q.identity();
         t.m.compose(t.p, t.q, t.s);
@@ -148,12 +153,14 @@ function InstancedCells({
     }
 
     const writeCell = (cell: Cell): boolean => {
-      const [i, j, zMean, zMax, cls, occ, dyn] = cell;
+      const [i, j, zMean, zMax, cls, occ, dyn, trav] = cell;
       if (!Number.isFinite(zMax) || !Number.isFinite(zMean)) return false;
       if (i < 0 || i >= meta.n_rings || j < 0 || j >= meta.n_theta) return false;
       const key = `${i}:${j}`;
       const prevSlot = c.slotOf.get(key);
       const prev = prevSlot !== undefined ? c.geo[prevSlot] : null;
+      // Dirty-skip on sensor truth only (no trav/dyn cache) — keeps per-frame
+      // accuracy (instant free every scan) but avoids re-pushing unchanged cells.
       if (prev && prev.zMax === zMax && prev.zMean === zMean && prev.occ === occ && prev.cls === cls) {
         return false;
       }
@@ -184,8 +191,21 @@ function InstancedCells({
       t.s.set(b.scaleX, height, b.scaleZ);
       t.m.compose(t.p, t.q, t.s);
       mesh.setMatrixAt(slot, t.m);
-      t.c.setHex(c.hex.get(cls) ?? 0xffffff);
-      mesh.setColorAt(slot, t.c.multiplyScalar(0.25 + 0.75 * Math.min(1, 0.4 + occ)));
+      let cellColor: number;
+      if (travMode) {
+        if (trav >= 0.7) cellColor = 0x22c55e;       // green: drivable
+        else if (trav >= 0.4) cellColor = 0xf59e0b;   // amber: caution
+        else cellColor = 0xef4444;                      // red: blocked
+      } else {
+        cellColor = c.hex.get(cls) ?? 0xffffff;
+      }
+      // Per-band donut shading: gentler falloff so the outer rings stay
+      // legible (10m/25m/50m previously too dark). Pure range, no DK.
+      // 0-5m:1.00  5-10m:0.90  10-25m:0.78  25-50m:0.62  50m+:0.48
+      const rMid = (c.edges[i] + c.edges[i + 1]) / 2;
+      const bandIntensity = rMid < 5 ? 1.0 : rMid < 10 ? 0.9 : rMid < 25 ? 0.78 : rMid < 50 ? 0.62 : 0.48;
+      t.c.setHex(cellColor);
+      mesh.setColorAt(slot, t.c.multiplyScalar((0.35 + 0.65 * Math.min(1, 0.4 + occ)) * bandIntensity));
       c.geo[slot] = {
         i,
         j,
@@ -194,10 +214,13 @@ function InstancedCells({
         cls,
         occ,
         dyn,
+        trav,
         pos: [b.posX, posY, b.posZ],
         rotY: secA.th,
         scale: [b.scaleX, height, b.scaleZ],
-        color: CLASS_COLOR.get(cls) ?? "#ffffff",
+        color: travMode
+          ? (trav >= 0.7 ? "#22c55e" : trav >= 0.4 ? "#f59e0b" : "#ef4444")
+          : (CLASS_COLOR.get(cls) ?? "#ffffff"),
         alpha: Math.min(1, 0.4 + occ),
       };
       return true;
@@ -207,7 +230,10 @@ function InstancedCells({
       const key = `${i}:${j}`;
       const slot = c.slotOf.get(key);
       if (slot === undefined) return false;
-      t.p.set(0, 0, 0);
+      // Park freed instances far below ground with zero scale so they don't
+      // cluster at the ego origin as degenerate flickering lines/dots (precise
+      // mode frees ~1k slots per frame).
+      t.p.set(0, -1000, 0);
       t.s.set(0, 0, 0);
       t.q.identity();
       t.m.compose(t.p, t.q, t.s);
@@ -244,18 +270,37 @@ function InstancedCells({
       mesh.instanceMatrix.needsUpdate = true;
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
-  }, [cells, meta, patch, opacity]);
+  }, [cells, meta, patch, opacity, travMode]);
+
+  // Ensure the bounding sphere covers the full scene so raycasting finds
+  // instances even when most slots are at the origin (freed / not yet written).
+  useLayoutEffect(() => {
+    const mesh = ref.current;
+    if (!mesh) return;
+    mesh.geometry.computeBoundingSphere();
+    const sphere = mesh.geometry.boundingSphere;
+    if (sphere) {
+      sphere.radius = 200;
+      sphere.center.set(0, 0, 0);
+    }
+  }, [meta]);
 
   return (
     <instancedMesh
       ref={ref}
       args={[undefined, undefined, MAX_INSTANCES]}
       frustumCulled={false}
-      onPointerMove={(e) =>
-        onHover?.(
-          e.instanceId != null && cache.current && cache.current.geo[e.instanceId] ? cache.current.geo[e.instanceId] : null
-        )
-      }
+      onPointerMove={(e) => {
+        if (!onHover) return;
+        // R3F event.instanceId is the slot index; fall back to raycast order.
+        const id = (e as unknown as { instanceId?: number }).instanceId;
+        if (id != null && cache.current?.geo[id]) {
+          onHover(cache.current.geo[id]);
+        } else {
+          onHover(null);
+        }
+        e.stopPropagation();
+      }}
       onPointerOut={() => onHover?.(null)}
     >
       <boxGeometry />
@@ -275,12 +320,14 @@ export function CellLayer({
   patch,
   onHover,
   opacity = 1,
+  travMode = false,
 }: {
   cells: CellMap;
   meta: GridMeta | null;
   patch: CellPatch | null;
   onHover?: (info: CellInfo | null) => void;
   opacity?: number;
+  travMode?: boolean;
 }) {
   return (
     <InstancedCells
@@ -289,6 +336,7 @@ export function CellLayer({
       patch={patch}
       onHover={onHover}
       opacity={opacity}
+      travMode={travMode}
     />
   );
 }
@@ -418,10 +466,22 @@ export function RangeRings({ maxR }: { maxR: number }) {
   return (
     <group>
       {rings.map((r) => (
-        <mesh key={r} rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.02, 0]}>
-          <ringGeometry args={[r - 0.06, r, 128]} />
-          <meshBasicMaterial color="#52525b" side={THREE.DoubleSide} transparent opacity={0.7} />
-        </mesh>
+        <group key={r}>
+          <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.02, 0]}>
+            <ringGeometry args={[r - 0.06, r, 128]} />
+            <meshBasicMaterial color="#52525b" side={THREE.DoubleSide} transparent opacity={0.7} />
+          </mesh>
+          <Html
+            position={[r + 1.5, 0.3, 0]}
+            center
+            sprite
+            style={{ pointerEvents: "none" }}
+          >
+            <span className="hud-val whitespace-nowrap rounded bg-black/70 px-1.5 py-0.5">
+              {r}m
+            </span>
+          </Html>
+        </group>
       ))}
     </group>
   );
@@ -446,146 +506,47 @@ export function GroundPlane({ maxR }: { maxR: number }) {
   return (
     <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.05, 0]}>
       <planeGeometry args={[2 * maxR, 2 * maxR]} />
-      <meshBasicMaterial color="#18181b" />
+      <meshBasicMaterial color="#000000" />
     </mesh>
   );
 }
 
-const PERF_LOG_EVERY = 30;
-
-type TimerQueryExt = {
-  TIME_ELAPSED_EXT: number;
-  QUERY_RESULT_AVAILABLE_EXT: number;
-  QUERY_RESULT_EXT: number;
-  createQueryEXT: () => unknown;
-  beginQueryEXT: (target: number, q: unknown) => void;
-  endQueryEXT: (q: unknown) => void;
-  getQueryObjectEXT: (q: unknown, pname: number) => unknown;
-  deleteQueryEXT: (q: unknown) => void;
-};
-
-// In-canvas render telemetry. Logs an aggregate line every n frames with the
-// JS render cost (measured around gl.render, includes buffer uploads + draws),
-// GPU time via EXT_disjoint_timer_query_webgl2 when available, draw-call /
-// triangle counts, and how many stream patches were committed in that window.
-// Joins the [map] cadence log from useMapStream to separate server / wire /
-// JS / GPU stages of the pipeline.
-export function FramePerf() {
+export function PerfOverlay({ onStats }: { onStats?: (s: { fps: number; js: number; draws: number; tris: number }) => void }) {
   const gl = useThree((s) => s.gl);
-  const last = useRef(0);
-  const a = useRef({ n: 0, fps: 0, js: 0, gpu: 0, gpuN: 0, patches: 0 });
-  const renderMs = useRef(0);
-  const extRef = useRef<TimerQueryExt | null>(null);
-  const queryRef = useRef<unknown | null>(null);
-
+  const last = useRef<number | null>(null);
+  const acc = useRef({ n: 0, sumFps: 0, sumJs: 0 });
+  const t0 = useRef(0);
   useLayoutEffect(() => {
-    if (!gl || extRef.current) return;
-    // enable GPU timing only when every method the extension needs is present;
-    // otherwise keep timing off and always render through the original method
-    let ext: TimerQueryExt | null = null;
-    try {
-      const ctx = gl.getContext() as unknown as { getExtension: (name: string) => unknown };
-      const raw = (ctx.getExtension("EXT_disjoint_timer_query_webgl2") ?? null) as Partial<TimerQueryExt> | null;
-      if (
-        raw &&
-        typeof raw.createQueryEXT === "function" &&
-        typeof raw.beginQueryEXT === "function" &&
-        typeof raw.endQueryEXT === "function" &&
-        typeof raw.getQueryObjectEXT === "function" &&
-        typeof raw.deleteQueryEXT === "function"
-      ) {
-        ext = raw as TimerQueryExt;
-      } else {
-        console.warn("[render] GPU timer query extension unavailable; gpu= will be '-'");
-      }
-    } catch {
-      ext = null;
-      console.warn("[render] GPU timer query unavailable; gpu= will be '-'");
-    }
-    extRef.current = ext;
     const orig = gl.render.bind(gl);
-    gl.render = (scene, camera) => {
-      const t0 = performance.now();
-      const ext_ = extRef.current;
-      if (ext_ && !queryRef.current) {
-        try {
-          const q = ext_.createQueryEXT();
-          queryRef.current = q;
-          ext_.beginQueryEXT(ext_.TIME_ELAPSED_EXT, q);
-          orig(scene, camera);
-          ext_.endQueryEXT(q);
-        } catch {
-          try {
-            if (queryRef.current) ext_.endQueryEXT(queryRef.current);
-          } catch {
-            /* context lost; skip GPU timing */
-          }
-          queryRef.current = null;
-        }
-      } else {
-        orig(scene, camera);
-      }
-      renderMs.current = performance.now() - t0;
+    gl.render = ((scene: THREE.Scene, camera: THREE.Camera) => {
+      t0.current = performance.now();
+      orig(scene, camera);
+      const dt = performance.now() - t0.current;
+      acc.current.sumJs += dt;
+    }) as unknown as typeof gl.render;
+    return () => {
+      gl.render = orig;
     };
   }, [gl]);
-
   useFrame(() => {
-    const now = performance.now();
-    if (!last.current) {
-      last.current = now;
+    if (last.current === null) {
+      last.current = performance.now();
       return;
     }
+    const now = performance.now();
     const dt = now - last.current;
     last.current = now;
-    const ext = extRef.current;
-    const q = queryRef.current;
-    if (ext && q) {
-      try {
-        if (ext.getQueryObjectEXT(q, ext.QUERY_RESULT_AVAILABLE_EXT)) {
-          const t = ext.getQueryObjectEXT(q, ext.QUERY_RESULT_EXT) as number;
-          ext.deleteQueryEXT(q);
-          queryRef.current = null;
-          a.current.gpu += t / 1e6;
-          a.current.gpuN++;
-        }
-      } catch {
-        try {
-          ext.deleteQueryEXT(q);
-        } catch {
-          /* ignore */
-        }
-        queryRef.current = null;
-      }
-    }
-    a.current.n++;
-    a.current.fps += 1000 / dt;
-    a.current.js += renderMs.current;
-    if (typeof window !== "undefined") {
-      const w = window as unknown as { __pc2d?: { commits: number } };
-      if (w.__pc2d) {
-        a.current.patches += w.__pc2d.commits;
-        w.__pc2d.commits = 0;
-      }
-    }
-    if (a.current.n >= PERF_LOG_EVERY) {
+    acc.current.n += 1;
+    acc.current.sumFps += 1000 / Math.max(dt, 0.1);
+    if (acc.current.n >= 30) {
       const info = gl.info.render;
-      const gpuAvg = a.current.gpuN ? a.current.gpu / a.current.gpuN : NaN;
-      console.log(
-        `[render] fps=${(a.current.fps / a.current.n).toFixed(1)} ` +
-          `js=${(a.current.js / a.current.n).toFixed(2)}ms ` +
-          `gpu=${Number.isFinite(gpuAvg) ? gpuAvg.toFixed(2) : "-"}ms ` +
-          `draws=${info.calls} tris=${(info.triangles / 1000).toFixed(1)}k ` +
-          `pts=${info.points} patches=${a.current.patches}`
-      );
-      a.current.n = 0;
-      a.current.fps = 0;
-      a.current.js = 0;
-      a.current.gpu = 0;
-      a.current.gpuN = 0;
-      a.current.patches = 0;
+      const avgFps = acc.current.sumFps / acc.current.n;
+      const avgJs = acc.current.sumJs / acc.current.n;
+      onStats?.({ fps: avgFps, js: avgJs, draws: info.calls, tris: info.triangles });
+      console.log(`[perf] fps=${avgFps.toFixed(1)} js=${avgJs.toFixed(2)}ms draws=${info.calls} tris=${(info.triangles/1000).toFixed(1)}k`);
+      acc.current = { n: 0, sumFps: 0, sumJs: 0 };
     }
   });
-
   return null;
 }
 

@@ -1,4 +1,5 @@
-export type Cell = [number, number, number, number, number, number, number];
+/** Cell tuple: [i, j, zMean, zMax, cls, occ, dyn, trav] */
+export type Cell = [number, number, number, number, number, number, number, number];
 
 export type GridMeta = {
   type: "grid_meta";
@@ -10,6 +11,8 @@ export type GridMeta = {
   n_theta: number;
   n_classes: number;
   class_colors: Record<string, string>;
+  seq_id?: string;
+  seq_len?: number;
 };
 
 export type Stats = {
@@ -22,6 +25,8 @@ export type Stats = {
   grid_ms?: number;
   pack_ms?: number;
   cloud_ms?: number;
+  project_ms?: number;
+  forward_ms?: number;
   grid_mem_kb: number;
   uniform_equiv_mb: number;
   compression_ratio: number;
@@ -29,6 +34,10 @@ export type Stats = {
   seq_pos?: number;
   seq_len?: number;
   epoch?: number;
+  frames_emitted?: number;
+  frames_dropped?: number;
+  rendered_cells?: number;
+  capacity_compression?: number;
 };
 
 export type SnapshotMsg = {
@@ -61,10 +70,12 @@ export type CloudMsg = {
 
 export type AckMsg = {
   type: "control_ack";
-  action: "pause" | "play" | "speed" | "seek";
+  action: "pause" | "play" | "speed" | "seek" | "switch_sequence";
   frame: number;
   idx?: number;
   epoch?: number;
+  seq_id?: string;
+  seq_len?: number;
 };
 
 export type DoneMsg = {

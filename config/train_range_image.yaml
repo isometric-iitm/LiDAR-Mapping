@@ -1,6 +1,6 @@
 data:
-  raw_root: "F:/sih/dataset/sequences"
-  processed_root: "F:/sih/processed"
+  raw_root: "data/sequences"   # relative to pc2d/; override with $PC2D_RAW_ROOT
+  processed_root: "data/processed"  # relative to pc2d/; override with $PC2D_PROCESSED_ROOT
   train_seqs: [0, 1, 2, 3, 4, 5, 6, 7]
   val_seqs: [8]
   shard_size: 200
@@ -10,6 +10,8 @@ model:
   name: "range_image_unet"
   h: 64
   w: 2048
+  device: auto      # auto | cuda | cpu ; auto = cuda if available else cpu; override with $PC2D_DEVICE
+  precision: fp16   # fp32 | fp16 ; fp16 enables autocast + GradScaler on cuda; override with $PC2D_PRECISION
   fov_top_deg: 2.0
   fov_bottom_deg: -24.8
   in_channels: 5
@@ -48,6 +50,6 @@ train:
     cutout_w: 256
 
 checkpoint:
-  dir: "F:/sih/checkpoints"
+  dir: "checkpoints"  # relative to pc2d/; override with $PC2D_CKPT_DIR
   best_name: "best_miou.pt"
   last_name: "last.pt"

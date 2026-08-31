@@ -24,7 +24,9 @@ class SemanticKITTIReplayer:
         native_hz: float = 10.0,
         start_idx: int = 0,
     ):
-        self.velodyne_dir = Path(seq_dir) / "velodyne"
+        self.seq_dir = Path(seq_dir)
+        self.seq_id = self.seq_dir.name
+        self.velodyne_dir = self.seq_dir / "velodyne"
         self.speed = max(0.05, playback_speed)
         self.loop = loop
         self.native_hz = native_hz
@@ -45,7 +47,7 @@ class SemanticKITTIReplayer:
         if idx >= len(self.bin_paths):
             return None, False
         pts = np.fromfile(str(self.bin_paths[idx]), dtype=np.float32).reshape(-1, 4)
-        return Frame(timestamp=idx / self.native_hz, points=pts, seq_id="08", idx=idx), True
+        return Frame(timestamp=idx / self.native_hz, points=pts, seq_id=self.seq_id, idx=idx), True
 
     def get(self, timeout: float = 10.0) -> Frame | None:
         """Wall-clock paced frame fetch. Returns None on stop / timeout."""

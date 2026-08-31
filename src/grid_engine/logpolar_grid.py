@@ -4,6 +4,8 @@ from pathlib import Path
 import numpy as np
 import yaml
 
+from src.grid_engine.traversability import compute_traversability
+
 UNKNOWN = 255
 
 
@@ -35,12 +37,11 @@ class LogPolarGrid:
         self.n_classes = int(g["n_classes"])
 
         d = cfg["decay"]
+        self.decay_enabled = bool(d.get("enabled", False))
         self.tau_free = d["tau_free"]
         self.frame_hz = d["frame_hz"]
         self.occ_gain = d["occupancy_gain"]
         self.occ_threshold = d["occ_threshold"]
-        self.dyn_threshold = d["dyn_threshold"]
-        self.dyn_change_boost = d["dyn_change_boost"]
 
         m = cfg["memory"]
         self.uniform_side = m["uniform_cell_guess"]
@@ -58,16 +59,27 @@ class LogPolarGrid:
         self._ring_edges = np.concatenate([[self.r_min], self.r_min + np.cumsum(self.ring_widths)])
         # ring i covers [_ring_edges[i], _ring_edges[i+1]); width dr_0 * alpha^i (grows 5cm -> ~50cm)
 
-        # state (struct-of-arrays)
+        # state (struct-of-arrays) — AP0 precise: no temporal smoothing
         self.z_mean = np.zeros(self.n_cells, dtype=np.float32)
         self._z_min_state = np.full(self.n_cells, np.inf, dtype=np.float32)
         self._z_max_state = np.full(self.n_cells, -np.inf, dtype=np.float32)
         self.cls_hist = np.zeros((self.n_cells, self.n_classes), dtype=np.float32)
         self.dominant_class = np.full(self.n_cells, UNKNOWN, dtype=np.uint8)
         self.occupancy = np.zeros(self.n_cells, dtype=np.float32)
+        # kept for wire compat (row 6/7) but always 0 in precise mode — no DK
         self.dynamic_score = np.zeros(self.n_cells, dtype=np.float32)
         self.last_update = np.zeros(self.n_cells, dtype=np.int64)
         self.frame = 0
+
+        # traversability config
+        trav_cfg = cfg.get("traversability", {})
+        self.trav_enabled = trav_cfg.get("enabled", True)
+        self.trav_weights = trav_cfg.get("weights", [0.25, 0.25, 0.35, 0.15])
+        self.trav_class_scores = trav_cfg.get("class_scores", [1.0, 0.6, 0.2, 0.1])
+        self.trav_z_diff_thresh = trav_cfg.get("z_diff_thresh", 0.5)
+        self.trav_slope_thresh = trav_cfg.get("slope_thresh", 0.4)
+        self.traversability = np.zeros(self.n_cells, dtype=np.float32)
+        self._trav_dirty = False
 
         # last-sent display values (change detection for incremental deltas)
         self._sent_zmax = np.zeros(self.n_cells, dtype=np.float32)
@@ -76,7 +88,7 @@ class LogPolarGrid:
         # so the grid and the point cloud share a common "ground = 0" reference
         self.ground_z = 0.0
 
-        # per-frame scratch
+        # per-frame scratch (no DK — per-frame sensor truth)
         self._z_min_f = np.full(self.n_cells, np.inf, dtype=np.float32)
         self._z_max_f = np.full(self.n_cells, -np.inf, dtype=np.float32)
         self._z_sum_f = np.zeros(self.n_cells, dtype=np.float64)
@@ -84,7 +96,7 @@ class LogPolarGrid:
         self._cls_count_f = np.zeros((self.n_cells, self.n_classes), dtype=np.int32)
         self._prev_rendered = np.zeros(self.n_cells, dtype=bool)
         self._touched = np.zeros(self.n_cells, dtype=bool)
-        self._prev_occ_state = np.zeros(self.n_cells, dtype=bool)
+        self._ever_seen = np.zeros(self.n_cells, dtype=bool)
 
     # --- geometry ---
     def ring_index(self, r: np.ndarray) -> np.ndarray:
@@ -128,10 +140,15 @@ class LogPolarGrid:
         j = self.sector_index(tk)
         cells = i * self.n_theta + j
 
-        # decay all cells a step
-        decay = math.exp(-(1.0 / self.frame_hz) / self.tau_free)
-        self.occupancy *= decay
-        self.dynamic_score *= decay
+        # occupancy handling: precise mode (decay disabled) = per-frame sensor view,
+        # no temporal persistence; otherwise exponential decay.
+        pre_rendered = self.occupancy > self.occ_threshold
+        if self.decay_enabled:
+            decay = math.exp(-(1.0 / self.frame_hz) / self.tau_free)
+            self.occupancy *= decay
+        else:
+            # precise: occupancy will be set per-frame below; no decay to apply here
+            pass
 
         # grouped scatter-reduce: one stable sort + vectorized min/max/sum,
         # replacing 5 unbuffered np.*.at calls (~10x faster, SIMD-friendly)
@@ -160,31 +177,113 @@ class LogPolarGrid:
         self._cls_count_f[uniq] = cls_counts[uniq]
         self._touched[uniq] = True
 
-        # occupancy up on hit cells
-        occ_hit = self.occupancy[uniq]
-        self.occupancy[uniq] = occ_hit + (1.0 - occ_hit) * self.occ_gain
+        if self.decay_enabled:
+            # decaying mode: occupancy EMA, class EMA, z running min/max/EMA
+            occ_hit = self.occupancy[uniq]
+            self.occupancy[uniq] = occ_hit + (1.0 - occ_hit) * self.occ_gain
+            frac = cls_counts[uniq].astype(np.float32) / seg_count[:, None].astype(np.float32)
+            self.cls_hist[uniq] = self.cls_hist[uniq] * 0.6 + frac * 0.4
+            self.dominant_class[uniq] = np.argmax(self.cls_hist[uniq], axis=1).astype(np.uint8)
+            new_mean = zsum_c / seg_count
+            first_seen = ~self._ever_seen[uniq]
+            self.z_mean[uniq] = np.where(
+                first_seen,
+                new_mean.astype(np.float32),
+                self.z_mean[uniq] * 0.7 + new_mean.astype(np.float32) * 0.3,
+            )
+            fs_idx = np.flatnonzero(first_seen)
+            if fs_idx.size:
+                fsu = uniq[fs_idx]
+                self._z_min_state[fsu] = zmin_c[fs_idx].astype(np.float32)
+                self._z_max_state[fsu] = zmax_c[fs_idx].astype(np.float32)
+            rs_idx = np.flatnonzero(~first_seen)
+            if rs_idx.size:
+                rsu = uniq[rs_idx]
+                self._z_min_state[rsu] = np.minimum(self._z_min_state[rsu], zmin_c[rs_idx].astype(np.float32))
+                self._z_max_state[rsu] = np.maximum(self._z_max_state[rsu], zmax_c[rs_idx].astype(np.float32))
+            self._ever_seen[uniq] = True
+        else:
+            # precise mode: strictly per-frame — no history, no window, no DK.
+            # Occupancy is binary this scan only; anything not hit this frame is free.
+            # This eliminates all temporal ghosts / stale height.
+            self.occupancy[uniq] = float(self.occ_gain)
+            # instant free: any previously rendered cell not hit this scan goes free now
+            is_hit = np.zeros(self.n_cells, dtype=bool)
+            is_hit[uniq] = True
+            to_free = pre_rendered & ~is_hit
+            if np.any(to_free):
+                self.occupancy[to_free] = 0.0
+            # class: per-frame majority (no history)
+            self.dominant_class[uniq] = np.argmax(
+                cls_counts[uniq].astype(np.float32) / seg_count[:, None].astype(np.float32), axis=1
+            ).astype(np.uint8)
+            self.cls_hist[uniq] = 0
+            # one-hot the current dominant for debug consistency
+            self.cls_hist[uniq, self.dominant_class[uniq]] = 1.0
+            # z: per-frame directly (no running min/max)
+            new_mean = zsum_c / seg_count
+            self.z_mean[uniq] = new_mean.astype(np.float32)
+            self._z_min_state[uniq] = zmin_c.astype(np.float32)
+            self._z_max_state[uniq] = zmax_c.astype(np.float32)
+            self._ever_seen[uniq] = True
+            # trav: per-hit compute using absolute height above ground + class.
+            # Intra-cell z_diff is ~0 for single-point precise cells, so use height.
+            height_u = zmax_c.astype(np.float32) - float(self.ground_z)
+            # height 0-0.3m => drivable flat, 0.3-1.0m => curb/caution, >1.0m => blocked
+            z_score_u = np.clip(1.0 - np.maximum(height_u, 0.0) / (self.trav_z_diff_thresh * 2.5), 0, 1)
+            cls_u = self.dominant_class[uniq]
+            lut = np.zeros(256, dtype=np.float32)
+            for ci, sc in enumerate(self.trav_class_scores):
+                if ci < 256:
+                    lut[ci] = sc
+            cls_score_u = lut[cls_u]
+            # estimate slope from per-cell height vs neighbor ground (skip full O(n) slope);
+            # use height itself as proxy: tall => steep => slope_score low
+            slope_score_u = np.clip(1.0 - np.maximum(height_u - 0.15, 0.0) / self.trav_slope_thresh, 0, 1)
+            occ_score_u = np.clip(float(self.occ_gain), 0, 1)
+            w_z, w_s, w_c, w_o = self.trav_weights
+            trav_u = (w_z * z_score_u + w_s * slope_score_u + w_c * cls_score_u + w_o * occ_score_u) / (w_z + w_s + w_c + w_o)
+            self.traversability[uniq] = trav_u.astype(np.float32)
+            # cells freed this frame must have their ever_seen cleared so next
+            # hit is treated as first-seen (already handled by occupancy free,
+            # but also need to keep freed clearing block below effective)
 
-        # class histogram EMA + dominant class
-        frac = cls_counts[uniq].astype(np.float32) / seg_count[:, None].astype(np.float32)
-        self.cls_hist[uniq] = self.cls_hist[uniq] * 0.6 + frac * 0.4
-        self.dominant_class[uniq] = np.argmax(self.cls_hist[uniq], axis=1).astype(np.uint8)
-
-        # z-stat update (persistent)
-        self._z_min_state[uniq] = np.minimum(self._z_min_state[uniq], zmin_c.astype(np.float32))
-        self._z_max_state[uniq] = np.maximum(self._z_max_state[uniq], zmax_c.astype(np.float32))
-        new_mean = zsum_c / seg_count
-        self.z_mean[uniq] = self.z_mean[uniq] * 0.7 + new_mean.astype(np.float32) * 0.3
-
-        # dynamics: free -> occupied flip boosts dynamic_score
-        now_occ = self.occupancy > self.occ_threshold
-        flipped = now_occ[uniq] & ~self._prev_occ_state[uniq]
-        self.dynamic_score[uniq] += self.dyn_change_boost * flipped.astype(np.float32)
-        np.clip(self.dynamic_score, 0.0, 1.0, out=self.dynamic_score)
+        # freed by decay — stale world content has scrolled past this polar cell;
+        # clear height / class so the next hit starts fresh (prevents radial
+        # ghost terrain and empty holes where dynamic left but stale _z_max kept
+        # height inflated or cls_hist kept the blue tint).
+        post_rendered = self.occupancy > self.occ_threshold
+        newly_freed = pre_rendered & ~post_rendered
+        if np.any(newly_freed):
+            self._z_min_state[newly_freed] = np.inf
+            self._z_max_state[newly_freed] = -np.inf
+            self.z_mean[newly_freed] = 0
+            self._ever_seen[newly_freed] = False
+            self.cls_hist[newly_freed] = 0
+            self.dominant_class[newly_freed] = UNKNOWN
+            self.traversability[newly_freed] = 0
 
         # bookkeeping
-        self._prev_occ_state = now_occ
         self.last_update[uniq] = self.frame
         self.frame += 1
+        # In precise (sensor-direct) mode traversability is not computed every frame
+        # to avoid the O(n_cells) full-grid cost that was dropping 30fps -> 10fps.
+        # Trav view will still read per-cell trav as 0 (no shading) until decay mode.
+        if self.decay_enabled:
+            self._trav_dirty = True
+
+        # traversability: per-cell drivability score (0-1) — only in decay mode
+        if self.decay_enabled and self.trav_enabled and self._trav_dirty:
+            self.traversability = compute_traversability(
+                self._z_min_state, self._z_max_state, self.z_mean,
+                self.dominant_class, self.occupancy,
+                self.n_rings, self.n_theta, self.ring_widths,
+                weights=self.trav_weights,
+                class_scores=self.trav_class_scores,
+                z_diff_thresh=self.trav_z_diff_thresh,
+                slope_thresh=self.trav_slope_thresh,
+            )
+            self._trav_dirty = False
 
         n_hit = len(uniq)
         self._clear_scratch()
@@ -203,7 +302,7 @@ class LogPolarGrid:
         return self.occupancy > self.occ_threshold
 
     def _rows(self, idx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Client rows (k,6) float32 [i, j, z_mean, z_max, occ, dyn] + cls u8,
+        """Client rows (k,7) float32 [i, j, z_mean, z_max, occ, dyn, trav] + cls u8,
         with z stats rebased onto the ego ground so height reads "above road"."""
         i = idx // self.n_theta
         j = idx % self.n_theta
@@ -212,6 +311,7 @@ class LogPolarGrid:
             i.astype(np.float32), j.astype(np.float32),
             self.z_mean[idx] - g, self._z_max_state[idx] - g,
             self.occupancy[idx], self.dynamic_score[idx],
+            self.traversability[idx],
         ], axis=1)
         return rows, self.dominant_class[idx]
 
@@ -224,7 +324,7 @@ class LogPolarGrid:
     def snapshot(self) -> dict:
         """Full snapshot of rendered cells.
 
-        Returns {frame, rows: (k,6) float32 [i, j, z_mean, z_max, occ, dyn],
+        Returns {frame, rows: (k,7) float32 [i, j, z_mean, z_max, occ, dyn, trav],
         cls: (k,) uint8} — raw arrays, packed to binary by the protocol layer.
         Marks every cell as sent so subsequent deltas are purely incremental.
         """
@@ -233,7 +333,7 @@ class LogPolarGrid:
         if idx.size:
             rows, cls = self._rows(idx)
         else:
-            rows = np.zeros((0, 6), dtype=np.float32)
+            rows = np.zeros((0, 7), dtype=np.float32)
             cls = np.zeros(0, dtype=np.uint8)
         self._prev_rendered = mask
         self._mark_sent(idx)
@@ -245,7 +345,7 @@ class LogPolarGrid:
     def delta(self) -> dict:
         """Changed cells since last call.
 
-        Returns {frame, rows: (k,6) float32 [i, j, z_mean, z_max, occ, dyn],
+        Returns {frame, rows: (k,7) float32 [i, j, z_mean, z_max, occ, dyn, trav],
         cls: (k,) uint8, freed: (m,2) float32 [i, j]} — raw arrays.
 
         Includes: cells that toggled rendered state (added/freed) AND cells
@@ -268,7 +368,7 @@ class LogPolarGrid:
         if idx.size:
             rows, cls = self._rows(idx)
         else:
-            rows = np.zeros((0, 6), dtype=np.float32)
+            rows = np.zeros((0, 7), dtype=np.float32)
             cls = np.zeros(0, dtype=np.uint8)
         self._prev_rendered = mask
         self._mark_sent(idx)
@@ -291,26 +391,49 @@ class LogPolarGrid:
         }
 
     def reset(self):
-        self.__init__()
+        self.z_mean[:] = 0
+        self._z_min_state[:] = np.inf
+        self._z_max_state[:] = -np.inf
+        self.cls_hist[:] = 0
+        self.dominant_class[:] = UNKNOWN
+        self.occupancy[:] = 0
+        self.dynamic_score[:] = 0
+        self.last_update[:] = 0
+        self.frame = 0
+        self._ever_seen[:] = False
+        self.traversability[:] = 0
+        self._trav_dirty = False
+        self._sent_zmax[:] = 0
+        self._sent_cls[:] = UNKNOWN
+        self.ground_z = 0.0
+        self._prev_rendered[:] = False
+        self._clear_scratch()
 
     # --- memory accountant (PROJECT_SPEC §9.2 / acceptance criterion) ---
     @property
     def bytes_per_cell(self) -> float:
-        return 3 * 4 + self.n_classes * 4 + 1 + 4 + 4 + 8
+        return 3 * 4 + self.n_classes * 4 + 1 + 4 + 4 + 4 + 8
 
     def memory_report(self) -> dict:
+        rendered = int(np.count_nonzero(self.occupancy > self.occ_threshold))
         grid_bytes = self.n_cells * self.bytes_per_cell
+        rendered_bytes = rendered * self.bytes_per_cell
         uniform_cells = (self.uniform_side / self.uniform_dx) ** 2
         uniform_bytes = uniform_cells * self.bytes_per_cell
+        capacity_ratio = round(uniform_cells / self.n_cells, 1)
         return {
             "n_rings": self.n_rings,
             "n_theta": self.n_theta,
             "n_cells": self.n_cells,
+            "rendered_cells": rendered,
             "ring_width_near_m": float(self.ring_widths[0]),
             "ring_width_far_m": float(self.ring_widths[-1]),
             "grid_bytes": int(grid_bytes),
             "grid_kb": round(grid_bytes / 1024.0, 1),
+            "rendered_bytes": int(rendered_bytes),
+            "rendered_kb": round(rendered_bytes / 1024.0, 1),
             "uniform_cells": int(uniform_cells),
             "uniform_mb": round(uniform_bytes / 1e6, 1),
-            "compression_ratio": round(uniform_cells / self.n_cells, 1),
+            "compression_ratio": round(uniform_cells / max(1, rendered), 1) if rendered else capacity_ratio,
+            "capacity_compression": capacity_ratio,
         }

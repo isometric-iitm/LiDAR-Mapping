@@ -61,7 +61,7 @@ def update_confusion(cm: np.ndarray, preds: np.ndarray, targets: np.ndarray, ign
 
 
 @torch.no_grad()
-def validate(model, val_loader, loss_fn, device, num_classes: int, max_batches: int = 20):
+def validate(model, val_loader, loss_fn, device, num_classes: int, max_batches: int = 20, use_amp: bool = False):
     model.eval()
     total_loss = 0.0
     cm_5 = np.zeros((num_classes, num_classes), dtype=np.int64)
@@ -76,7 +76,7 @@ def validate(model, val_loader, loss_fn, device, num_classes: int, max_batches: 
         ri_batch = ri_batch.to(device, non_blocking=True)
         li_batch = li_batch.to(device, non_blocking=True)
 
-        with torch.amp.autocast("cuda", enabled=True):
+        with torch.amp.autocast("cuda", enabled=use_amp):
             logits = model(ri_batch)
             loss = loss_fn(logits, li_batch)
 
@@ -102,11 +102,18 @@ def validate(model, val_loader, loss_fn, device, num_classes: int, max_batches: 
     return avg_loss, miou_5, miou_4, class_ious_5, class_ious_4
 
 
-def train(cfg: dict, resume: str | None = None):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+def train(cfg: dict, resume: str | None = None,
+          processed_root: str | Path | None = None,
+          ckpt_dir: str | Path | None = None,
+          device_override: str | None = None,
+          precision_override: str | None = None):
+    from src.common.config import resolve_device, resolve_precision, resolve_path
+    device = torch.device(resolve_device(device_override or cfg["model"].get("device", "auto")))
+    precision = resolve_precision(precision_override or cfg["model"].get("precision", "fp16"))
+    use_amp = device.type == "cuda" and precision == "fp16"
+    print(f"Device: {device}  precision: {precision}  amp: {use_amp}")
 
-    processed_root = cfg["data"]["processed_root"]
+    processed_root = resolve_path(processed_root or cfg["data"]["processed_root"])
     meta_path = Path(processed_root) / "meta.json"
     if not meta_path.exists():
         print(f"ERROR: {meta_path} not found. Run scripts/preprocess_to_shards.py first.")
@@ -151,7 +158,9 @@ def train(cfg: dict, resume: str | None = None):
         weight_decay=cfg["train"]["weight_decay"],
     )
 
-    scaler = torch.amp.GradScaler("cuda")
+    # GradScaler is only meaningful under fp16 AMP on CUDA — its use on CPU
+    # errors, so it is None there and all call sites are guarded.
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
 
     batch_size = cfg["train"]["batch_size"]
     grad_accum = cfg["train"]["grad_accum_steps"]
@@ -163,7 +172,7 @@ def train(cfg: dict, resume: str | None = None):
 
     augment = RangeImageAugment(cfg["train"].get("augmentation", {}))
 
-    ckpt_dir = Path(cfg["checkpoint"]["dir"])
+    ckpt_dir = resolve_path(ckpt_dir or cfg["checkpoint"]["dir"])
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_path = ckpt_dir / cfg["checkpoint"]["best_name"]
     last_path = ckpt_dir / cfg["checkpoint"]["last_name"]
@@ -179,7 +188,8 @@ def train(cfg: dict, resume: str | None = None):
         ckpt = torch.load(resume, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        scaler.load_state_dict(ckpt["scaler_state_dict"])
+        if scaler is not None and ckpt.get("scaler_state_dict") is not None:
+            scaler.load_state_dict(ckpt["scaler_state_dict"])
         start_epoch = ckpt["epoch"]
         global_step = ckpt["step"]
         best_miou = ckpt.get("best_miou", 0.0)
@@ -226,7 +236,7 @@ def train(cfg: dict, resume: str | None = None):
 
             ri_gpu, li_gpu = augment.batch_augment(ri_gpu, li_gpu)
 
-            with torch.amp.autocast("cuda", enabled=True):
+            with torch.amp.autocast("cuda", enabled=use_amp):
                 logits = model(ri_gpu)
                 loss = loss_fn(logits, li_gpu)
                 loss = loss / grad_accum
@@ -236,13 +246,20 @@ def train(cfg: dict, resume: str | None = None):
                 global_step += 1
                 continue
 
-            scaler.scale(loss).backward()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
             if (global_step + 1) % grad_accum == 0:
-                scaler.unscale_(optimizer)
+                if scaler is not None:
+                    scaler.unscale_(optimizer)
                 nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                scaler.step(optimizer)
-                scaler.update()
+                if scaler is not None:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
                 scheduler.step(global_step)
 
@@ -257,20 +274,25 @@ def train(cfg: dict, resume: str | None = None):
                 dt = time.time() - step_t0
                 steps_per_sec = running_n / max(dt, 0.001)
                 lr_now = optimizer.param_groups[0]["lr"]
-                vram_mb = torch.cuda.max_memory_allocated(device) / 1e6
-                print(f"  step {global_step:>6d} | loss {avg_rloss:.4f} | lr {lr_now:.2e} | {steps_per_sec:.1f} steps/s | vram {vram_mb:.0f}MB")
+                if use_amp:
+                    vram_mb = torch.cuda.max_memory_allocated(device) / 1e6
+                    torch.cuda.reset_peak_memory_stats(device)
+                    print(f"  step {global_step:>6d} | loss {avg_rloss:.4f} | lr {lr_now:.2e} | {steps_per_sec:.1f} steps/s | vram {vram_mb:.0f}MB")
+                else:
+                    print(f"  step {global_step:>6d} | loss {avg_rloss:.4f} | lr {lr_now:.2e} | {steps_per_sec:.1f} steps/s")
                 running_loss = 0.0
                 running_n = 0
                 step_t0 = time.time()
-                torch.cuda.reset_peak_memory_stats(device)
 
             if global_step % val_every == 0 and global_step > 0:
                 val_loss, miou_5, miou_4, ci_5, ci_4 = validate(
                     model, val_loader, loss_fn, device, num_classes=num_classes,
+                    use_amp=use_amp,
                 )
                 lr_now = optimizer.param_groups[0]["lr"]
                 gc.collect()
-                torch.cuda.empty_cache()
+                if use_amp:
+                    torch.cuda.empty_cache()
 
                 print(f"  [Step {global_step}] val_loss={val_loss:.4f} | miou_5class={miou_5:.4f} miou_4class={miou_4:.4f} | lr={lr_now:.6f}")
                 for ci, cn in zip(ci_5, CLASS_NAMES_5):
@@ -298,7 +320,7 @@ def train(cfg: dict, resume: str | None = None):
                     torch.save({
                         "model_state_dict": model.state_dict(),
                         "optimizer_state_dict": optimizer.state_dict(),
-                        "scaler_state_dict": scaler.state_dict(),
+                        "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
                         "epoch": epoch,
                         "step": global_step,
                         "best_miou": best_miou,
@@ -316,13 +338,16 @@ def train(cfg: dict, resume: str | None = None):
 
         avg_loss = epoch_loss / max(epoch_steps, 1)
         elapsed = time.time() - t0
-        vram_mb = torch.cuda.max_memory_allocated(device) / 1e6
-        print(f"Epoch {epoch}: loss={avg_loss:.4f} time={elapsed:.1f}s vram={vram_mb:.0f}MB")
+        if use_amp:
+            vram_mb = torch.cuda.max_memory_allocated(device) / 1e6
+            print(f"Epoch {epoch}: loss={avg_loss:.4f} time={elapsed:.1f}s vram={vram_mb:.0f}MB")
+        else:
+            print(f"Epoch {epoch}: loss={avg_loss:.4f} time={elapsed:.1f}s")
 
         torch.save({
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
-            "scaler_state_dict": scaler.state_dict(),
+            "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
             "epoch": epoch + 1,
             "step": global_step,
             "best_miou": best_miou,
@@ -334,17 +359,34 @@ def train(cfg: dict, resume: str | None = None):
 
 
 def main():
-    import yaml
+    from src.common.config import load_config
     parser = argparse.ArgumentParser(description="Train range-image UNet")
     parser.add_argument("--config", type=str, default="train_range_image")
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--processed-root", type=str, default=None,
+                        help="Root with train/val shards + meta.json (default: config + PC2D_PROCESSED_ROOT)")
+    parser.add_argument("--raw-root", type=str, default=None,
+                        help="Root of raw sequences (default: config + PC2D_RAW_ROOT)")
+    parser.add_argument("--ckpt-dir", type=str, default=None,
+                        help="Directory for checkpoints + history.jsonl (default: config + PC2D_CKPT_DIR)")
+    parser.add_argument("--device", type=str, default=None,
+                        choices=["auto", "cuda", "cpu"],
+                        help="Override device (overrides config and PC2D_DEVICE)")
+    parser.add_argument("--precision", type=str, default=None,
+                        choices=["fp32", "fp16"],
+                        help="Override precision (overrides config and PC2D_PRECISION)")
     args = parser.parse_args()
 
-    config_path = Path(__file__).resolve().parent.parent / "config" / f"{args.config}.yaml"
-    with open(config_path) as f:
-        cfg = yaml.safe_load(f)
+    cfg = load_config(args.config)
 
-    train(cfg, resume=args.resume)
+    # CLI flags take highest priority; raw_root only matters if a later step needs it.
+    if args.raw_root:
+        cfg["data"]["raw_root"] = args.raw_root
+    train(cfg, resume=args.resume,
+          processed_root=args.processed_root,
+          ckpt_dir=args.ckpt_dir,
+          device_override=args.device,
+          precision_override=args.precision)
 
 
 if __name__ == "__main__":

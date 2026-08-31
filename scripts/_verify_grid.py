@@ -6,6 +6,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.common.config import load_config, resolve_path
 from src.grid_engine.logpolar_grid import LogPolarGrid, load_grid_config
 from src.models.predict import Segmenter
 from src.data.label_mapping import bin_5_to_4
@@ -31,8 +32,10 @@ print("ring_index(100.0)==", grid.ring_index(np.array([100.0])).item(), f"(expec
 
 # real segmented scan streaming simulation
 print("\n=== real seq-08 streaming (60 frames, speed fast) ===")
-seg = Segmenter("F:/sih/checkpoints/best_miou.pt")
-bins = sorted(Path("F:/sih/dataset/sequences/08/velodyne").glob("*.bin"))
+cfg = load_config("pipeline")
+seq_vel = resolve_path(cfg["source"]["seq_dir"]) / "velodyne"
+seg = Segmenter("checkpoints/best_miou.pt")
+bins = sorted(seq_vel.glob("*.bin"))
 grid2 = LogPolarGrid(cfg)
 t0 = time.time()
 sizes = []

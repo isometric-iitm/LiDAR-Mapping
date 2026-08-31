@@ -30,6 +30,8 @@ export type UseMapStream = {
   seeking: boolean;
   seekTo: (idx: number) => void;
   send: (msg: object) => void;
+  seqId: string;
+  switchSequence: (seqId: string) => void;
 };
 
 const WS_URL = process.env.NEXT_PUBLIC_PC2D_WS ?? "ws://localhost:8000/ws/map";
@@ -87,18 +89,18 @@ function parseBinary(buf: ArrayBuffer): MapMsg | null {
   }
   if (code !== K_SNAPSHOT && code !== K_DELTA) return null;
 
-  // row record is 28 bytes: [i,j,z_mean,z_max,occ,dyn] f32 (24) + cls u8 + 3 pad
-  const f = new Float32Array(buf, 44, n * 6);
-  const cls = new Uint8Array(buf, 44 + n * 24, n);
+  // row record is 32 bytes: [i,j,z_mean,z_max,occ,dyn,trav] f32 (28) + cls u8 + 3 pad
+  const f = new Float32Array(buf, 44, n * 7);
+  const cls = new Uint8Array(buf, 44 + n * 28, n);
   const cells = new Array<Cell>(n);
   for (let k = 0; k < n; k++) {
-    const o = k * 6;
-    cells[k] = [f[o], f[o + 1], f[o + 2], f[o + 3], cls[k], f[o + 4], f[o + 5]];
+    const o = k * 7;
+    cells[k] = [f[o], f[o + 1], f[o + 2], f[o + 3], cls[k], f[o + 4], f[o + 5], f[o + 6]];
   }
   if (code === K_SNAPSHOT) {
     return { type: "snapshot", ...base, cells };
   }
-  const freedNr = new Float32Array(buf, 44 + n * 28, nFreed * 2);
+  const freedNr = new Float32Array(buf, 44 + n * 32, nFreed * 2);
   const freed = new Array<[number, number]>(nFreed);
   for (let k = 0; k < nFreed; k++) freed[k] = [freedNr[2 * k], freedNr[2 * k + 1]];
   return { type: "delta", ...base, cells, freed };
@@ -115,6 +117,7 @@ export function useMapStream(): UseMapStream {
   const [seeking, setSeeking] = useState(false);
   const [heading, setHeading] = useState(0);
   const [patch, setPatch] = useState<CellPatch | null>(null);
+  const [seqId, setSeqId] = useState("");
 
   const wsRef = useRef<WebSocket | null>(null);
   const full = useRef<Map<string, Cell>>(new Map());
@@ -126,19 +129,26 @@ export function useMapStream(): UseMapStream {
   const cloudOnRef = useRef(false);
   const lastHeading = useRef(-1);
   const cloudBuf = useRef<{ xyz: Float32Array; cls: Uint8Array; off: number } | null>(null);
-  const lastCommitTs = useRef(0);
-  const decodeMsRef = useRef(0);
-  const frameLog = useRef<{ frame: number; ts: number; n: number }[]>([]);
+
   const deltaAcc = useRef<Cell[]>([]);
 
   useEffect(() => {
     let cancelled = false;
     let retry: ReturnType<typeof setTimeout> | null = null;
+    let attempts = 0;
 
     const connect = () => {
       if (cancelled) return;
       setConn("connecting");
-      const ws = new WebSocket(WS_URL);
+      let ws: WebSocket;
+      try {
+        ws = new WebSocket(WS_URL);
+      } catch {
+        const backoff = Math.min(500 * 2 ** attempts, 5000);
+        attempts += 1;
+        retry = setTimeout(connect, backoff);
+        return;
+      }
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
       sendRef.current = (msg: object) => {
@@ -146,41 +156,8 @@ export function useMapStream(): UseMapStream {
       };
 
       ws.onopen = () => {
+        attempts = 0;
         if (!cancelled) setConn("open");
-      };
-
-      // per-frame render telemetry: printed on every committed message so the
-      // inter-frame cadence / decode cost for choppiness tuning is visible
-      const logCommit = (frame: number, n: number) => {
-        const now = performance.now();
-        const since = lastCommitTs.current ? now - lastCommitTs.current : 0;
-        lastCommitTs.current = now;
-        if (typeof window !== "undefined") {
-          const w = window as unknown as { __pc2d?: { commits: number } };
-          if (!w.__pc2d) w.__pc2d = { commits: 0 };
-          w.__pc2d.commits++;
-        }
-        console.log(
-          `[map] frame=${frame} renderedAt=${new Date().toISOString()} ` +
-            `sincePrev=${since.toFixed(1)}ms decode=${decodeMsRef.current.toFixed(2)}ms n=${n}`
-        );
-        frameLog.current.push({ frame, ts: now, n });
-        if (frameLog.current.length >= 120) {
-          const xs = frameLog.current;
-          const dts: number[] = [];
-          for (let k = 1; k < xs.length; k++) dts.push(xs[k].ts - xs[k - 1].ts);
-          dts.sort((a, b) => a - b);
-          const avg = dts.reduce((a, b) => a + b, 0) / dts.length;
-          const p95 = dts[Math.floor(dts.length * 0.95)] ?? dts[0];
-          console.groupCollapsed(`[map] perf summary (last ${xs.length} commits)`);
-          console.log(
-            `cadence avg=${avg.toFixed(1)}ms p95=${p95.toFixed(1)}ms max=${dts[dts.length - 1].toFixed(1)}ms ` +
-              `decode avg=${(decodeMsRef.current).toFixed(2)}ms`
-          );
-          console.log(`est. fps=${(1000 / Math.max(avg, 1e-3)).toFixed(1)}`);
-          console.groupEnd();
-          frameLog.current = [];
-        }
       };
 
       const handleMsg = (msg: MapMsg) => {
@@ -200,6 +177,7 @@ export function useMapStream(): UseMapStream {
           setSeeking(false);
           setCells(new Map());
           setPatch({ kind: "reset", frame: 0 });
+          if ("seq_id" in msg && typeof msg.seq_id === "string") setSeqId(msg.seq_id);
           return;
         }
 
@@ -210,6 +188,17 @@ export function useMapStream(): UseMapStream {
             epochRef.current = msg.epoch ?? epochRef.current;
             freezeFrame.current = -1;
             setSeeking(false);
+            full.current.clear();
+            snapBuf.current.clear();
+            deltaAcc.current = [];
+            setCells(new Map());
+            setCloud(null);
+            setPatch({ kind: "reset", frame: msg.frame ?? 0 });
+          } else if (msg.action === "switch_sequence") {
+            epochRef.current = msg.epoch ?? epochRef.current;
+            freezeFrame.current = -1;
+            setSeeking(false);
+            setSeqId(msg.seq_id ?? "");
             full.current.clear();
             snapBuf.current.clear();
             deltaAcc.current = [];
@@ -264,7 +253,6 @@ export function useMapStream(): UseMapStream {
           if (msg.seq === msg.total - 1 && cb) {
             setCloud({ frame: msg.frame, xyz: cb.xyz.slice(0, cb.off * 3), cls: cb.cls.slice(0, cb.off) });
             cloudBuf.current = null;
-            logCommit(msg.frame, cb.off);
           }
           return;
         }
@@ -284,7 +272,6 @@ export function useMapStream(): UseMapStream {
             setLastFrame(msg.frame);
             setPatch({ kind: "delta", frame: msg.frame, upserts: deltaAcc.current, frees: msg.freed });
             deltaAcc.current = [];
-            logCommit(msg.frame, full.current.size);
           }
           return;
         }
@@ -302,7 +289,6 @@ export function useMapStream(): UseMapStream {
             setCells(new Map(full.current));
             setLastFrame(msg.frame);
             setPatch({ kind: "snap", frame: msg.frame, upserts: [...snapBuf.current.values()] });
-            logCommit(msg.frame, full.current.size);
           }
         }
       };
@@ -316,9 +302,7 @@ export function useMapStream(): UseMapStream {
             /* ignore malformed */
           }
         } else {
-          const t0 = performance.now();
           const msg = parseBinary(ev.data as ArrayBuffer);
-          decodeMsRef.current = performance.now() - t0;
           if (msg) handleMsg(msg);
         }
       };
@@ -326,10 +310,16 @@ export function useMapStream(): UseMapStream {
       ws.onclose = () => {
         if (cancelled) return;
         setConn("closed");
-        retry = setTimeout(connect, 2000);
+        const backoff = Math.min(500 * 2 ** attempts, 5000);
+        attempts += 1;
+        console.warn(`[ws] closed, reconnect in ${backoff}ms (attempt ${attempts})`);
+        retry = setTimeout(connect, backoff);
       };
 
-      ws.onerror = () => ws.close();
+      ws.onerror = () => {
+        // onerror is followed by onclose; just ensure close fires
+        try { ws.close(); } catch {}
+      };
     };
 
     connect();
@@ -356,6 +346,11 @@ export function useMapStream(): UseMapStream {
     sendRef.current({ type: "control", action: "seek", value: idx });
   }, []);
 
+  const switchSequence = useCallback((newSeqId: string) => {
+    setSeeking(true);
+    sendRef.current({ type: "control", action: "switch_sequence", value: newSeqId });
+  }, []);
+
   return {
     conn,
     meta,
@@ -371,5 +366,7 @@ export function useMapStream(): UseMapStream {
     seeking,
     seekTo,
     send,
+    seqId,
+    switchSequence,
   };
 }
