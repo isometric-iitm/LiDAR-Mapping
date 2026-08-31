@@ -200,6 +200,8 @@ function InstancedCells({
         t.s.set(b.scaleX, height, b.scaleZ);
         t.m.compose(t.p, t.q, t.s);
         mesh.setMatrixAt(slot, t.m);
+        matDirty = true;
+        dirty = true;
       }
       let cellColor: number;
       if (travMode) {
@@ -219,6 +221,8 @@ function InstancedCells({
       // Only write the per-instance color attribute when the RGB actually changed.
       if (!prev || prev.rgb !== t.c.getHex()) {
         mesh.setColorAt(slot, t.c);
+        colDirty = true;
+        dirty = true;
       }
       // Reuse the slot's geo object (avoid ~37k allocations/frame -> GC pressure).
       const g = prev ?? ({} as CellGeo);
@@ -263,39 +267,42 @@ function InstancedCells({
     };
 
     let dirty = false;
+    let matDirty = false;
+    let colDirty = false;
     let written = 0;
     let freed_count = 0;
     const t0 = performance.now();
     if (patch.kind === "reset") {
       clearAll();
       dirty = true;
+      matDirty = true;
+      colDirty = true;
     } else if (patch.kind === "delta") {
       for (const cell of patch.upserts) { if (writeCell(cell)) written++; dirty = true; }
-      for (const [i, j] of patch.frees) { if (freeCell(i, j)) freed_count++; dirty = true; }
+      for (const [i, j] of patch.frees) { if (freeCell(i, j)) { freed_count++; dirty = true; matDirty = true; colDirty = true; } }
     } else {
       // snapshot: reconcile against the authoritative full map, skipping
       // slots/rows whose values are unchanged so steady-state snapshots are ~free.
       for (const key of [...c.slotOf.keys()]) {
-        if (!cells.has(key)) { freeCell(Number(key.split(":")[0]), Number(key.split(":")[1])); freed_count++; dirty = true; }
+        if (!cells.has(key)) { freeCell(Number(key.split(":")[0]), Number(key.split(":")[1])); freed_count++; dirty = true; matDirty = true; colDirty = true; }
       }
       for (const cell of patch.upserts) {
         if (!cells.has(`${cell[0]}:${cell[1]}`)) continue;
         if (writeCell(cell)) written++;
-        dirty = true;
       }
     }
     const layoutMs = performance.now() - t0;
     if (written > 0 || freed_count > 0) {
-      console.debug(
+      console.log(
         `[grid:render] patch=${patch.kind} written=${written} freed=${freed_count} ` +
-        `live=${c.next} dirty=${dirty} layout=${layoutMs.toFixed(1)}ms`
+        `live=${c.slotOf.size} dirty=${dirty} layout=${layoutMs.toFixed(1)}ms`
       );
     }
 
     if (dirty) {
       mesh.count = c.next;
-      mesh.instanceMatrix.needsUpdate = true;
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      if (matDirty) mesh.instanceMatrix.needsUpdate = true;
+      if (colDirty && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
   }, [cells, meta, patch, opacity, travMode]);
 

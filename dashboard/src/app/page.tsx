@@ -170,14 +170,16 @@ export default function Home() {
   const [animTarget, setAnimTarget] = useState<{ pos: THREE.Vector3; look: THREE.Vector3 } | null>(null);
   const [availableSeqs, setAvailableSeqs] = useState<SeqInfo[]>([]);
 
-  // client-side perf tracking (wired to PerfOverlay)
-  const clientPerfRef = useRef({ fps: 0, js: 0, draws: 0, tris: 0 });
+  // client-side perf tracking (wired to PerfOverlay + sidebar FPS)
+  const [clientFps, setClientFps] = useState(0);
+  const [clientJs, setClientJs] = useState(0);
   const clientPerfN = useRef(0);
   const onClientPerf = useCallback((s: { fps: number; js: number; draws: number; tris: number }) => {
-    clientPerfRef.current = s;
+    setClientFps(s.fps);
+    setClientJs(s.js);
     clientPerfN.current += 1;
     if (clientPerfN.current % 10 === 0) {
-      console.debug(
+      console.log(
         `[render:perf] client_fps=${s.fps.toFixed(1)} js=${s.js.toFixed(1)}ms ` +
         `draws=${s.draws} tris=${(s.tris / 1000).toFixed(0)}K`
       );
@@ -326,7 +328,7 @@ export default function Home() {
               </div>
             </div>
           )}
-          {!buffering && cells.size === 0 && meta && (
+          {!buffering && cellCount === 0 && meta && (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
               <div className="frost px-4 py-2 text-xs text-zinc-400">Press Play to start</div>
             </div>
@@ -419,6 +421,8 @@ export default function Home() {
 
         <MetricsPanel
           stats={stats}
+          clientFps={clientFps}
+          clientJs={clientJs}
           cellCount={cellCount}
           lastFrame={lastFrame}
           viewMode={viewMode}

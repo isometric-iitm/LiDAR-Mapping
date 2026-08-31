@@ -146,6 +146,10 @@ export function useMapStream(): UseMapStream {
   const full = useRef<Map<string, Cell>>(new Map());
   const snapBuf = useRef<Map<string, Cell>>(new Map());
   const snapFrame = useRef(-1);
+  // Lightweight live-count state so the sidebar "Cells"/empty-hint update every
+  // delta without an O(n) `cells` copy each frame (`cells` stays authoritative
+  // on snapshot/reset only - same-ref mutation on deltas would otherwise bail out).
+  const [liveCount, setLiveCount] = useState(0);
   const sendRef = useRef<(msg: object) => void>(() => {});
   const freezeFrame = useRef(-1); // -1 = live; else hold grid state at this frame
   const epochRef = useRef(-1);    // seek epoch; mismatched frames are stale
@@ -230,6 +234,8 @@ export function useMapStream(): UseMapStream {
           setHeading(0);
           setSeeking(false);
           setCells(new Map());
+          setLiveCount(0);
+          deltaAcc.current = [];
           setPatch({ kind: "reset", frame: 0 });
           if ("seq_id" in msg && typeof msg.seq_id === "string") setSeqId(msg.seq_id);
           return;
@@ -255,6 +261,7 @@ export function useMapStream(): UseMapStream {
             snapBuf.current.clear();
             deltaAcc.current = [];
             setCells(new Map());
+            setLiveCount(0);
             setCloud(null);
             setPatch({ kind: "reset", frame: msg.frame ?? 0 });
           } else if (msg.action === "switch_sequence") {
@@ -266,6 +273,7 @@ export function useMapStream(): UseMapStream {
             snapBuf.current.clear();
             deltaAcc.current = [];
             setCells(new Map());
+            setLiveCount(0);
             setCloud(null);
             setPatch({ kind: "reset", frame: msg.frame ?? 0 });
           }
@@ -321,9 +329,16 @@ export function useMapStream(): UseMapStream {
         }
 
         if (msg.type === "delta") {
-          // Incremental: apply chunks directly onto the live map. 'freed' is
-          // attached to the final chunk so it arrives here only once.
+          // Incremental frame. The server sends each frame as a chain of chunks
+          // (seq 0..total-1); 'freed' rides on the final chunk. Apply upserts
+          // eagerly (cheap per-chunk) and commit on the final chunk. A fresh
+          // frame always starts at seq 0 — if we see one, any partial
+          // accumulation from a prior frame is stale, so reset it to avoid
+          // leaking upserts across dropped frames.
           const t0 = performance.now();
+          if (msg.seq === 0) {
+            deltaAcc.current = [];
+          }
           for (const c of msg.cells) {
             full.current.set(`${c[0]}:${c[1]}`, c);
             deltaAcc.current.push(c);
@@ -337,11 +352,12 @@ export function useMapStream(): UseMapStream {
             // read on snapshot frames and for the empty/hint check, so an
             // O(n) copy each delta frame is wasted work. Snapshots resync it.
             setCells(full.current);
+            setLiveCount(full.current.size);
             setLastFrame(msg.frame);
             setPatch({ kind: "delta", frame: msg.frame, upserts: deltaAcc.current, frees: msg.freed });
             const mapCopyMs = performance.now() - mapCopy0;
             const totalMs = performance.now() - t0;
-            console.debug(
+            console.log(
               `[ws:delta] f=${msg.frame} seq=${msg.seq}/${msg.total} ` +
               `cells=${msg.cells.length} freed=${msg.freed.length} ` +
               `map_size=${full.current.size} ` +
@@ -366,7 +382,9 @@ export function useMapStream(): UseMapStream {
             const t1 = performance.now();
             full.current = new Map(snapBuf.current);
             setCells(new Map(full.current));
+            setLiveCount(full.current.size);
             setLastFrame(msg.frame);
+            deltaAcc.current = [];
             setPatch({ kind: "snap", frame: msg.frame, upserts: [...snapBuf.current.values()] });
             const t2 = performance.now();
             console.debug(
@@ -469,7 +487,7 @@ export function useMapStream(): UseMapStream {
     cells,
     lastFrame,
     stats,
-    cellCount: cells.size,
+    cellCount: liveCount,
     cloud,
     cloudOn,
     setCloudOn: setCloudOnLocal,

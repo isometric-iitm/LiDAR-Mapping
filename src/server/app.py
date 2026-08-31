@@ -51,6 +51,11 @@ class Pipeline:
         self.pause_event = threading.Event()
         self._frames_emitted = 0
         self._frames_dropped = 0
+        # Flat cell indices (i*n_theta+j) whose `freed` was computed by delta()
+        # but whose outgoing frame was dropped by the queue (overflow). Merged
+        # into the next successfully-emitted delta so the client never loses a
+        # free (the source of ghost cells). Cleared on snapshot / seek.
+        self._pending_free: set = set()
         # start paused: the dashboard must explicitly press Play (auto-play
         # off on page load). Seek previews still render one frame while paused.
         self.speed = float(src["playback_speed"])
@@ -135,6 +140,7 @@ class Pipeline:
         for buf in self._stage_window.values():
             buf.clear()
         self.epoch += 1
+        self._pending_free.clear()
         with self._seek_lock:
             self._preview = True
 
@@ -173,6 +179,7 @@ class Pipeline:
         self._frames_dropped = 0
         self._perf_n = 0
         self._perf_sum = {"seg": 0.0, "grid": 0.0, "pack": 0.0, "proc": 0.0}
+        self._pending_free.clear()
         while True:
             try:
                 self.messages.get_nowait()
@@ -230,6 +237,45 @@ class Pipeline:
                 self._frames_dropped += 1
                 pass
 
+    def _emit_frame(self, chunks, kind: str = "binary") -> bool:
+        """Enqueue all chunks of one logical frame atomically.
+
+        If the whole frame cannot fit, drop it as a unit (never deliver a
+        truncated/partial frame) and drain queued binary frames to make room.
+        Returns True if the frame was successfully sent, False if it was
+        dropped entirely — the caller may then preserve state (e.g. freed
+        rows) for a later merge instead of silently losing them.
+        """
+        is_binary = kind != "text"
+        if is_binary and self._wire_compress:
+            chunks = [ws_protocol._maybe_compress(c, enabled=True) for c in chunks]
+        items = [("B", c) for c in chunks] if is_binary else [("T", c) for c in chunks]
+        q = self.messages
+        n = len(items)
+        if q.qsize() + n > q.maxsize:
+            # Whole frame won't fit — discard queued binary frames (keep text
+            # stats/acks) and count every dropped binary chunk.
+            kept: list = []
+            while True:
+                try:
+                    it = q.get_nowait()
+                    if it[0] == "T":
+                        kept.append(it)
+                    else:
+                        self._frames_dropped += 1
+                except queue.Empty:
+                    break
+            for k in kept:
+                try:
+                    q.put_nowait(k)
+                except queue.Full:
+                    self._frames_dropped += 1
+            return False
+        for it in items:
+            q.put_nowait(it)
+        self._frames_emitted += n
+        return True
+
     def _loop(self):
         stats_iv = self.cfg["server"]["stats_interval_frames"]
         snap_iv = self.cfg["server"]["snapshot_interval_frames"]
@@ -278,6 +324,11 @@ class Pipeline:
             else:
                 snap = self.grid.delta()
                 is_snap = False
+                # Merge frees that were computed but dropped earlier (queue
+                # overflow) into this delta so the client never loses a free
+                # (the source of ghost cells). Doing it under the lock keeps
+                # the rendered-mask read consistent with delta().
+                snap["freed"] = self._merge_pending_free(snap["freed"])
             t_snap = time.perf_counter()
             if self.grid.frame - self._last_stats_frame >= stats_iv:
                 # Recompute every interval so rendered KB / compression reflect live scene (was cached static)
@@ -290,16 +341,29 @@ class Pipeline:
         # binary grid frames (40-100x smaller than JSON, no .tolist() tax)
         yaw_cd = self._yaw_cd(frame.idx)
         n_rows = snap["rows"].shape[0]
-        n_freed = snap.get("freed", np.zeros((0, 2))).shape[0] if not is_snap else 0
-        frames = (ws_protocol.iter_snapshot_frames(snap["frame"], self.epoch, snap["rows"], snap["cls"], yaw_cd=yaw_cd)
-                  if is_snap else
-                  ws_protocol.iter_delta_frames(snap["frame"], self.epoch, snap["rows"], snap["cls"], snap["freed"], yaw_cd=yaw_cd))
-        n_chunks = 0
-        wire_bytes = 0
-        for b in frames:
-            wire_bytes += len(b)
-            n_chunks += 1
-            self._emit(b, "binary")
+        if is_snap:
+            # A snapshot is authoritative: the client fully resyncs, so any
+            # previously-pending frees are subsumed. Clear them once we
+            # actually manage to send it (dropped snapshots keep them).
+            freed = np.zeros((0, 2), dtype=np.float32)
+            frames = list(ws_protocol.iter_snapshot_frames(
+                snap["frame"], self.epoch, snap["rows"], snap["cls"], yaw_cd=yaw_cd))
+            sent = self._emit_frame(frames, "binary")
+            if sent:
+                self._pending_free.clear()
+        else:
+            # snap["freed"] was already merged with pending frees (under lock).
+            freed = snap["freed"]
+            frames = list(ws_protocol.iter_delta_frames(
+                snap["frame"], self.epoch, snap["rows"], snap["cls"], freed, yaw_cd=yaw_cd))
+            sent = self._emit_frame(frames, "binary")
+            if not sent and freed.shape[0]:
+                # Frame dropped wholesale — preserve its frees for the next
+                # successful delta (cells are still not-rendered).
+                self._pending_free |= self._free_to_flat(freed)
+        n_freed = freed.shape[0]
+        n_chunks = len(frames)
+        wire_bytes = sum(len(b) for b in frames)
         if not self._first_frame_emitted:
             self._first_frame_emitted = True
             self._emit({"type": "status", "state": "ready", "msg": "Streaming", "seq_id": self.seq_id}, "text")
@@ -421,6 +485,36 @@ class Pipeline:
             self.messages.get_nowait()
         except queue.Empty:
             pass
+
+    def _free_to_flat(self, freed: np.ndarray) -> set:
+        """Convert freed rows [i,j] into a set of flat cell indices (i*n_theta+j)."""
+        if freed.size == 0:
+            return set()
+        i = freed[:, 0].astype(np.int64)
+        j = freed[:, 1].astype(np.int64)
+        return set((i * self.grid.n_theta + j).tolist())
+
+    def _merge_pending_free(self, freed: np.ndarray) -> np.ndarray:
+        """Merge this frame's freed rows with any pending frees from frames that
+        were dropped by the queue. Pending frees are filtered against the current
+        rendered mask so a cell that was freed then re-added is NOT freed again
+        (which would wrongly remove the fresh cell). The pending set is cleared
+        after merging. Caller must hold self.grid_lock (reads rendered())."""
+        if not self._pending_free:
+            return freed
+        not_rendered = ~self.grid.rendered()
+        alive = [f for f in self._pending_free if not_rendered[f]]
+        self._pending_free = set()
+        if not alive:
+            return freed
+        flat = np.asarray(alive, dtype=np.int64)
+        pend = np.stack([
+            (flat // self.grid.n_theta).astype(np.float32),
+            (flat % self.grid.n_theta).astype(np.float32),
+        ], axis=1)
+        if freed.size:
+            return np.concatenate([pend, freed], axis=0)
+        return pend
 
     def _compute_stats(self, mem: dict) -> dict:
         win = self._frame_time_window

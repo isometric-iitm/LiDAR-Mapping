@@ -99,6 +99,8 @@ const VIEWS: { id: ViewMode; label: string; hint: string }[] = [
 
 export default function MetricsPanel({
   stats,
+  clientFps,
+  clientJs,
   cellCount,
   lastFrame,
   viewMode,
@@ -111,6 +113,8 @@ export default function MetricsPanel({
   hover,
 }: {
   stats: Stats | null;
+  clientFps: number;
+  clientJs: number;
   cellCount: number;
   lastFrame: number;
   viewMode: ViewMode;
@@ -124,7 +128,6 @@ export default function MetricsPanel({
   // against a ~MB uniform grid without the layout skewing to one extreme.
   const kb = stats?.grid_mem_kb ?? 0; // rendered live grid size (KB)
   const mb = stats?.uniform_equiv_mb ?? 0; // uniform 5cm grid size (MB, decimal)
-  const renderedCells = stats?.rendered_cells ?? stats?.n_cells ?? 0;
   const gridW = kb > 0
     ? Math.min(100, 18 + (Math.log10(kb) / (Math.log10(kb) + 1)) * 55)
     : 0;
@@ -133,8 +136,6 @@ export default function MetricsPanel({
   // Human-readable sizes, auto-scaled to the cleanest prefix (B/KB/MB/GB).
   const gridLabel = fmtSizeKB(kb);
   const uniformLabel = fmtBytes(mb * 1e6);
-  // Actual over-the-wire payload per frame: each rendered cell is a 32-byte row.
-  const wireLabel = renderedCells > 0 ? fmtBytes(renderedCells * 32) : "-";
 
   const perStage = [
     { k: "Seg", ms: stats?.seg_ms },
@@ -153,7 +154,7 @@ export default function MetricsPanel({
       <div className="border-b border-white/10 px-4 pb-3 pt-5">
         <div className="grid grid-cols-3 gap-2">
           <div>
-            <div className="hud-num hud-num--accent">{fmt(stats?.fps, 0)}</div>
+            <div className="hud-num hud-num--accent">{fmt(clientFps > 0 ? clientFps : stats?.fps, 0)}</div>
             <div className="hud-cap mt-1">FPS</div>
           </div>
           <div>
@@ -173,6 +174,10 @@ export default function MetricsPanel({
           <div className="hud-rail grid grid-cols-2 gap-x-4 gap-y-1">
             <Row k="p50" v={`${fmt(stats?.latency_ms_p50)}`} sub="ms" />
             <Row k="p95" v={`${fmt(stats?.latency_ms_p95)}`} sub="ms" />
+          </div>
+          <div className="hud-rail mt-1.5 grid grid-cols-2 gap-x-4 gap-y-1 border-t border-white/10 pt-1.5">
+            <Row k="Client fps" v={`${fmt(clientFps > 0 ? clientFps : undefined, 0)}`} />
+            <Row k="Client ms" v={`${fmt(clientJs)}`} sub="ms" />
           </div>
         </section>
 
@@ -203,10 +208,6 @@ export default function MetricsPanel({
           <div className="hud-rail space-y-3">
             <Bar label="Live log-polar map" widthPct={gridW} color="#22d3ee" value={gridLabel} unit="" />
             <Bar label="Uniform 5 cm grid" widthPct={uniformW} color="#a1a1aa" value={uniformLabel} unit="" />
-            <div className="flex items-baseline justify-between pt-0.5">
-              <span className="hud-label">Wire / frame</span>
-              <span className="hud-val">{wireLabel}</span>
-            </div>
             <div className="flex items-baseline justify-between border-t border-white/10 pt-2">
               <span className="text-sm text-zinc-400">Compression</span>
               <span className="hud-big">

@@ -14,7 +14,7 @@ model:
 server:
   host: "127.0.0.1"
   port: 8000
-  snapshot_interval_frames: 20   # full snapshot cadence (frames)
+  snapshot_interval_frames: 5    # full snapshot cadence (frames); ~0.25s at 20fps = fast ghost healing
   stats_interval_frames: 2       # stats cadence (frames; drives Timeline position)
   ckpt_dir: "checkpoints"        # for /metrics/history; override with $PC2D_CKPT_DIR
   cloud_points_max: 30000        # downsampled points for the accumulated cloud view
