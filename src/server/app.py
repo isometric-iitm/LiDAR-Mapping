@@ -34,7 +34,7 @@ class Pipeline:
     # state), so this threshold only bounds how far behind a slow dashboard can
     # fall before we force a cheap authoritative snapshot. Tuned well above the
     # normal snapshot interval so the periodic snapshot path is unaffected.
-    CATCHUP_DROP_THRESHOLD = 4
+    CATCHUP_DROP_THRESHOLD = 2
 
     def __init__(self, cfg: dict):
         from src.common.config import resolve_path

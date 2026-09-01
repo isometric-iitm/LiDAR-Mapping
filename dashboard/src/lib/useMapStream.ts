@@ -52,6 +52,21 @@ function pairFrom(flatKeys: number[], nTheta: number): [number, number][] {
   return out;
 }
 
+/** Purge entries from `map` whose keys don't appear in `keep`. Bounded so a
+ *  poisoned map never stalls a frame — only the first `cap` stale keys are
+ *  removed per call. Returns the number purged. */
+function purgeStale(map: Map<number, unknown>, keep: Set<number>, cap: number): number {
+  let n = 0;
+  for (const key of map.keys()) {
+    if (n >= cap) break;
+    if (!keep.has(key)) {
+      map.delete(key);
+      n++;
+    }
+  }
+  return n;
+}
+
 /** ServerMsg plus the fields the binary channel carries that the legacy JSON
  *  shapes didn't (chunk bookkeeping on cloud frames, per-frame ego yaw). */
 type MapMsg =
@@ -108,6 +123,10 @@ export function useMapStream(): UseMapStream {
   const deltaAcc = useRef<Cell[]>([]);
   const deltaFreed = useRef<number[]>([]);
   const deltaFrame = useRef(-1);
+  // Monotonically increasing frame counter: any decoded message whose frame
+  // is ≤ this is stale (arrived out of order from the async decoder pipeline)
+  // and must be dropped to prevent cross-contamination of accumulators.
+  const lastAppliedFrame = useRef(-1);
   // Binary frame decode (pako inflate + 28-byte row parse) runs in a worker so
   // it never contends with React/R3F for the main thread.
   const decoderRef = useRef<FrameDecoder | null>(null);
@@ -165,6 +184,7 @@ export function useMapStream(): UseMapStream {
           deltaAcc.current = [];
           deltaFreed.current.length = 0;
           deltaFrame.current = -1;
+          lastAppliedFrame.current = -1;
           setPatch({ kind: "reset", frame: 0 });
           if ("seq_id" in msg && typeof msg.seq_id === "string") setSeqId(msg.seq_id);
           return;
@@ -191,6 +211,7 @@ export function useMapStream(): UseMapStream {
             deltaAcc.current = [];
             deltaFreed.current.length = 0;
             deltaFrame.current = -1;
+            lastAppliedFrame.current = -1;
             setCells(new Map());
             setLiveCount(0);
             setCloud(null);
@@ -205,6 +226,7 @@ export function useMapStream(): UseMapStream {
             deltaAcc.current = [];
             deltaFreed.current.length = 0;
             deltaFrame.current = -1;
+            lastAppliedFrame.current = -1;
             setCells(new Map());
             setLiveCount(0);
             setCloud(null);
@@ -262,6 +284,11 @@ export function useMapStream(): UseMapStream {
         }
 
         if (msg.type === "delta") {
+          // Frame-ordering guard: drop any decoded frame that is stale (arrived
+          // out of order from the async decoder pipeline — its frame is ≤ the
+          // last one we successfully applied).
+          if (msg.frame <= lastAppliedFrame.current) return;
+
           // Incremental frame. The server sends each frame as a chain of chunks
           // (seq 0..total-1); 'freed' rides on the final chunk (but treat frees
           // as frame-scoped regardless of arrival chunk). We accumulate the
@@ -285,6 +312,25 @@ export function useMapStream(): UseMapStream {
             deltaFreed.current.push(keyOf(i, j, nThetaRef.current));
           }
           if (msg.seq === msg.total - 1) {
+            // Gap detection: if this frame is more than 1 ahead of the last
+            // applied frame, intermediate frames were lost on the wire. Purge
+            // stale entries from the authoritative map (cells that the server
+            // no longer considers rendered) before applying the delta, so
+            // map_size doesn't balloon with ghost entries until the next
+            // snapshot.
+            const gap = lastAppliedFrame.current >= 0
+              ? msg.frame - lastAppliedFrame.current - 1
+              : 0;
+            if (gap > 0) {
+              const upsertKeys = new Set<number>();
+              for (const c of deltaAcc.current) {
+                upsertKeys.add(keyOf(c[0], c[1], nThetaRef.current));
+              }
+              const purged = purgeStale(full.current, upsertKeys, 50000);
+              if (purged > 0) {
+                console.debug(`[ws:delta] gap=${gap} purged ${purged} stale entries before applying f=${msg.frame}`);
+              }
+            }
             const mapCopy0 = performance.now();
             // Free first, then upsert so a cell both freed and re-added in the
             // same frame ends up present (the upsert wins).
@@ -294,12 +340,10 @@ export function useMapStream(): UseMapStream {
             for (const c of deltaAcc.current) {
               full.current.set(keyOf(c[0], c[1], nThetaRef.current), c);
             }
-            // Pass the live map reference (not a full copy): `cells` is only
-            // read on snapshot frames and for the empty/hint check, so an
-            // O(n) copy each delta frame is wasted work. Snapshots resync it.
             setCells(full.current);
             setLiveCount(full.current.size);
             setLastFrame(msg.frame);
+            lastAppliedFrame.current = msg.frame;
             setPatch({ kind: "delta", frame: msg.frame, upserts: deltaAcc.current, frees: pairFrom(deltaFreed.current, nThetaRef.current) });
             const mapCopyMs = performance.now() - mapCopy0;
             const totalMs = performance.now() - t0;
@@ -317,6 +361,8 @@ export function useMapStream(): UseMapStream {
         }
 
         if (msg.type === "snapshot") {
+          // Frame-ordering guard for snapshots too.
+          if (msg.frame <= lastAppliedFrame.current && lastAppliedFrame.current >= 0) return;
           const t0 = performance.now();
           if (msg.seq === 0) {
             snapBuf.current = new Map();
@@ -334,6 +380,7 @@ export function useMapStream(): UseMapStream {
             deltaAcc.current = [];
             deltaFreed.current.length = 0;
             deltaFrame.current = msg.frame;
+            lastAppliedFrame.current = msg.frame;
             setPatch({ kind: "snap", frame: msg.frame, upserts: [...snapBuf.current.values()] });
             const t2 = performance.now();
             console.debug(

@@ -64,12 +64,18 @@ class Segmenter:
 
         if self._should_compile(self.device):
             plain = self.model
-            for mode in ("reduce-overhead", "default"):
-                self.model = torch.compile(plain, mode=mode, dynamic=False)
-                if self._warmup(in_channels):
-                    break
-                print(f"[Segmenter] torch.compile mode={mode!r} warmup failed")
-                self.model = plain
+            torch._dynamo.config.suppress_errors = True
+            for mode in ("default", "reduce-overhead"):
+                for dynamic in (False, True):
+                    self.model = torch.compile(plain, mode=mode, dynamic=dynamic)
+                    if self._warmup(in_channels):
+                        print(f"[Segmenter] torch.compile mode={mode!r} dynamic={dynamic} OK")
+                        break
+                    print(f"[Segmenter] torch.compile mode={mode!r} dynamic={dynamic} warmup failed")
+                    self.model = plain
+                else:
+                    continue
+                break
             else:
                 print("[Segmenter] torch.compile failed for all modes, falling back to eager")
                 self.model = plain
@@ -91,14 +97,16 @@ class Segmenter:
     def _warmup(self, in_channels: int) -> bool:
         """One dummy forward so torch.compile finishes graph capture before the
         live stream's first frame (otherwise frame 1 pays the whole compile
-        cost). Returns False if the forward raised (compile backout)."""
+        cost). Uses a realistic random input (not zeros) to exercise more
+        codepaths. Returns False if the forward raised (compile backout)."""
         dtype = torch.half if (self.device.type == "cuda" and self.precision == "fp16") else torch.float32
-        dummy = torch.zeros(1, in_channels, self.h, self.w, device=self.device, dtype=dtype)
+        dummy = torch.randn(1, in_channels, self.h, self.w, device=self.device, dtype=dtype)
         try:
             with torch.inference_mode():
                 with torch.amp.autocast("cuda", enabled=(self.device.type == "cuda" and self.precision == "fp16")):
                     self.model(dummy)
-        except Exception:
+        except Exception as e:
+            print(f"[Segmenter] warmup exception: {type(e).__name__}: {e}")
             return False
         return True
 
@@ -123,12 +131,9 @@ class Segmenter:
         with torch.amp.autocast("cuda", enabled=(self.device.type == "cuda" and self.precision == "fp16")):
             try:
                 logits = self.model(ri.unsqueeze(0))
-            except Exception:
-                # torch.compile (especially cudagraphs) can raise at runtime on
-                # some GPUs even after a successful warmup. Fall back to eager
-                # for the rest of the process lifetime.
+            except Exception as e:
                 if not self._compile_failed and hasattr(self.model, "_orig_mod"):
-                    print("[Segmenter] compiled model runtime error, falling back to eager")
+                    print(f"[Segmenter] compiled model runtime error ({type(e).__name__}: {e}), falling back to eager")
                     self.model = self.model._orig_mod
                     self._compile_failed = True
                     logits = self.model(ri.unsqueeze(0))
@@ -160,14 +165,15 @@ class Segmenter:
         if (
             k == 3
             and knn_triton is not None
+            and getattr(knn_triton, "_TRITON_OK", False)
             and proj.device.type == "cuda"
             and pixel_probs.dtype == torch.float32
             and pixel_probs.is_contiguous()
         ):
             try:
                 return knn_triton.triton_knn3(pixel_probs, proj, n)
-            except Exception:
-                pass  # fall through to the torch path
+            except Exception as e:
+                print(f"[Segmenter] triton_knn3 failed ({type(e).__name__}: {e}), falling back to torch")
         pp = pixel_probs.permute(0, 2, 3, 1).reshape(-1, c)  # (h*w, c) contiguous
         half = k // 2
         off = torch.arange(-half, half + 1, device=proj.device, dtype=torch.long)

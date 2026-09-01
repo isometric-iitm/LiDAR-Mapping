@@ -13,8 +13,35 @@ anything else falls back to the torch implementation. Import failure on a
 machine without triton is non-fatal (the fallback covers it).
 """
 
+import logging
+
 import triton
 import triton.language as tl
+
+logger = logging.getLogger(__name__)
+
+_TRITON_OK = True
+try:
+    import torch as _torch
+
+    if _torch.cuda.is_available():
+        _a = _torch.zeros(1, device="cuda", dtype=torch.float32)
+        _b = _torch.zeros(1, device="cuda", dtype=torch.float32)
+
+        @triton.jit
+        def _probe_kernel(x_ptr, y_ptr, N, BLOCK: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            mask = offs < N
+            x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+            tl.store(y_ptr + offs, x * 2.0, mask=mask)
+
+        _probe_kernel[(1,)](_a, _b, 1, BLOCK=1)
+        _torch.cuda.synchronize()
+        del _a, _b
+except Exception as _e:
+    _TRITON_OK = False
+    logger.warning("triton probe kernel failed (%s: %s), disabling Triton KNN path", type(_e).__name__, _e)
 
 
 @triton.jit
@@ -59,7 +86,11 @@ def triton_knn3(pixel_probs: "torch.Tensor", proj: "torch.Tensor", n: int) -> "t
         n: live point count (proj.shape[1]).
 
     Returns (n, c) float32 — same numbers as the torch mean-of-9 fallback.
+
+    Raises RuntimeError if the module-level triton probe failed at import.
     """
+    if not _TRITON_OK:
+        raise RuntimeError("triton probe failed at import, KNN path disabled")
     import torch
 
     c, h, w = pixel_probs.shape[1], pixel_probs.shape[2], pixel_probs.shape[3]
