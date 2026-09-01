@@ -1,9 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { inflateRaw } from "pako";
 import type { AckMsg, Cell, DeltaMsg, GridMeta, SnapshotMsg, Stats } from "./types";
+import { keyOf } from "./gridGeometry";
 
-export type CellMap = Map<string, Cell>;
+export type CellMap = Map<number, Cell>;
 export type ConnState = "connecting" | "open" | "closed";
 export type StatusState = "loading" | "buffering" | "ready" | "error";
 
@@ -45,18 +47,20 @@ const K_SNAPSHOT = 1;
 const K_DELTA = 2;
 const K_CLOUD = 3;
 
-/** Decompress a binary frame if it has the 'Z' prefix (zlib-compressed). */
-function maybeDecompress(buf: ArrayBuffer): ArrayBuffer {
+/** Decompress a binary frame if it has the 'Z' prefix (server raw-DEFLATE +
+ *  5-byte header: b'Z' + uint32 original length -- see ws_protocol.py).
+ *  Synchronous pako inflate avoids an await + stream teardown per WebSocket
+ *  message, which previously throttled high-fps binary chunk streams. */
+function decompressFrame(buf: ArrayBuffer): ArrayBuffer {
   const u8 = new Uint8Array(buf);
-  if (u8.length > 5 && u8[0] === 0x5a) { // 'Z'
-    const origSize = new DataView(buf).getUint32(1, true);
-    // Use DecompressionStream (native browser API) — but it's async.
-    // For sync path, fall back to pako if available, else pass through.
-    // Since DecompressionStream is async, we handle this in the caller.
-    // For now, return a marker that the caller can detect.
-    return buf; // caller will check first byte
+  if (u8.length <= 5 || u8[0] !== 0x5a) return buf; // not compressed
+  try {
+    const out = inflateRaw(u8.subarray(5));
+    return out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength);
+  } catch (e) {
+    console.warn("[ws] decompress failed, using raw:", e);
+    return buf;
   }
-  return buf;
 }
 
 /** Decode a server binary frame (see src/server/ws_protocol.py, 44-byte
@@ -143,8 +147,9 @@ export function useMapStream(): UseMapStream {
   const [buffering, setBuffering] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const full = useRef<Map<string, Cell>>(new Map());
-  const snapBuf = useRef<Map<string, Cell>>(new Map());
+  const nThetaRef = useRef(720); // set on grid_meta; used for flat cell keys
+  const full = useRef<Map<number, Cell>>(new Map());
+  const snapBuf = useRef<Map<number, Cell>>(new Map());
   const snapFrame = useRef(-1);
   // Lightweight live-count state so the sidebar "Cells"/empty-hint update every
   // delta without an O(n) `cells` copy each frame (`cells` stays authoritative
@@ -166,34 +171,6 @@ export function useMapStream(): UseMapStream {
     let cancelled = false;
     let retry: ReturnType<typeof setTimeout> | null = null;
     let attempts = 0;
-
-    /** Decompress zlib-compressed binary frame (prefixed with 'Z' + uint32 size). */
-    const decompressFrame = async (buf: ArrayBuffer): Promise<ArrayBuffer> => {
-      const u8 = new Uint8Array(buf);
-      if (u8.length <= 5 || u8[0] !== 0x5a) return buf; // not compressed
-      try {
-        const ds = new DecompressionStream("deflate-raw");
-        const writer = ds.writable.getWriter();
-        // skip 1-byte 'Z' prefix + 4-byte original size
-        writer.write(u8.slice(5));
-        writer.close();
-        const reader = ds.readable.getReader();
-        const chunks: Uint8Array[] = [];
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          chunks.push(value);
-        }
-        const totalLen = chunks.reduce((s, c) => s + c.length, 0);
-        const out = new Uint8Array(totalLen);
-        let off = 0;
-        for (const c of chunks) { out.set(c, off); off += c.length; }
-        return out.buffer;
-      } catch (e) {
-        console.warn("[ws] decompress failed, using raw:", e);
-        return buf;
-      }
-    };
 
     const connect = () => {
       if (cancelled) return;
@@ -226,6 +203,7 @@ export function useMapStream(): UseMapStream {
 
         if (msg.type === "grid_meta") {
           setMeta(msg);
+          nThetaRef.current = msg.n_theta;
           full.current.clear();
           snapBuf.current.clear();
           freezeFrame.current = -1;
@@ -340,11 +318,11 @@ export function useMapStream(): UseMapStream {
             deltaAcc.current = [];
           }
           for (const c of msg.cells) {
-            full.current.set(`${c[0]}:${c[1]}`, c);
+            full.current.set(keyOf(c[0], c[1], nThetaRef.current), c);
             deltaAcc.current.push(c);
           }
           for (const [i, j] of msg.freed) {
-            full.current.delete(`${i}:${j}`);
+            full.current.delete(keyOf(i, j, nThetaRef.current));
           }
           if (msg.seq === msg.total - 1) {
             const mapCopy0 = performance.now();
@@ -376,7 +354,7 @@ export function useMapStream(): UseMapStream {
             snapFrame.current = msg.frame;
           }
           for (const c of msg.cells) {
-            snapBuf.current.set(`${c[0]}:${c[1]}`, c);
+            snapBuf.current.set(keyOf(c[0], c[1], nThetaRef.current), c);
           }
           if (msg.seq === msg.total - 1) {
             const t1 = performance.now();
@@ -397,24 +375,19 @@ export function useMapStream(): UseMapStream {
         }
       };
 
-      ws.onmessage = async (ev) => {
-        if (cancelled) return;
-        if (typeof ev.data === "string") {
-          try {
-            handleMsg(JSON.parse(ev.data) as MapMsg);
-          } catch {
-            /* ignore malformed */
-          }
-        } else {
-          const t0 = performance.now();
-          let buf = ev.data as ArrayBuffer;
-          // decompress if server-side wire compression is enabled (Z prefix)
-          const u8Check = new Uint8Array(buf);
-          if (u8Check.length > 5 && u8Check[0] === 0x5a) {
-            buf = await decompressFrame(buf);
-          }
-          const parseMs = performance.now() - t0;
-          const msg = parseBinary(buf);
+ws.onmessage = (ev) => {
+          if (cancelled) return;
+          if (typeof ev.data === "string") {
+            try {
+              handleMsg(JSON.parse(ev.data) as MapMsg);
+            } catch {
+              /* ignore malformed */
+            }
+          } else {
+            const t0 = performance.now();
+            const buf = decompressFrame(ev.data as ArrayBuffer);
+            const parseMs = performance.now() - t0; // decompress + still parse below
+            const msg = parseBinary(buf);
           const t1 = performance.now();
           if (msg) handleMsg(msg);
           const handleMs = performance.now() - t1;

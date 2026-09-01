@@ -54,6 +54,57 @@ def _latency_stats(latencies):
     }
 
 
+class _BandStats:
+    """Shared confusion + per-distance-band accumulator for the pixel- and
+    point-level eval paths so both produce byte-identical result shapes.
+    `preds/tgts` may be image-shaped (H,W) or flat point vectors;
+    `update_confusion` flattens and drops ignore_index (255) rows on its own."""
+
+    def __init__(self, num_classes: int):
+        self.cm_5 = np.zeros((num_classes, num_classes), dtype=np.int64)
+        self.cm_4 = np.zeros((4, 4), dtype=np.int64)
+        self.band_cms_5 = {b: np.zeros((num_classes, num_classes), dtype=np.int64) for b in DISTANCE_BANDS}
+        self.band_cms_4 = {b: np.zeros((4, 4), dtype=np.int64) for b in DISTANCE_BANDS}
+        self.latencies = []
+
+    def observe(self, preds_5, tgts_5, ranges=None, latency_ms=None):
+        update_confusion(self.cm_5, preds_5, tgts_5)
+        preds_4 = bin_5_to_4(preds_5)
+        tgts_4 = bin_5_to_4(tgts_5)
+        update_confusion(self.cm_4, preds_4, tgts_4)
+        if latency_ms is not None:
+            self.latencies.append(latency_ms)
+        if ranges is None:
+            return
+        for lo, hi in DISTANCE_BANDS:
+            mask = (ranges >= lo) & (ranges < hi)
+            if mask.any():
+                update_confusion(self.band_cms_5[(lo, hi)], preds_5[mask], tgts_5[mask])
+                update_confusion(self.band_cms_4[(lo, hi)], preds_4[mask], tgts_4[mask])
+
+    def result(self, count_key: str, count_value: int) -> dict:
+        miou_5, ci_5 = miou_from_confusion(self.cm_5)
+        miou_4, ci_4 = miou_from_confusion(self.cm_4)
+        band_5, band_4 = {}, {}
+        for (lo, hi), name in zip(DISTANCE_BANDS, BAND_NAMES):
+            m5, c5 = miou_from_confusion(self.band_cms_5[(lo, hi)])
+            m4, c4 = miou_from_confusion(self.band_cms_4[(lo, hi)])
+            band_5[name] = {"miou": m5, "class_ious": dict(zip(CLASS_NAMES_5, _safe_floats(c5)))}
+            band_4[name] = {"miou": m4, "class_ious": dict(zip(CLASS_NAMES_4, _safe_floats(c4)))}
+        return {
+            count_key: count_value,
+            "miou_5class": miou_5,
+            "miou_4class": miou_4,
+            "class_ious_5": dict(zip(CLASS_NAMES_5, _safe_floats(ci_5))),
+            "class_ious_4": dict(zip(CLASS_NAMES_4, _safe_floats(ci_4))),
+            "per_distance_band_5class": band_5,
+            "per_distance_band_4class": band_4,
+            "confusion_5class": self.cm_5.tolist(),
+            "confusion_4class": self.cm_4.tolist(),
+            "latency_ms": _latency_stats(self.latencies),
+        }
+
+
 def _resolve_checkpoint(cfg):
     ckpt = os.getenv("PC2D_CHECKPOINT", "")
     if ckpt:
@@ -84,13 +135,8 @@ def _resolve_seq_dir(cfg, cli_override=None):
 
 def evaluate_pixel_level(model, val_loader, device, num_classes, use_amp, max_range, limit=None):
     model.eval()
-    cm_5 = np.zeros((num_classes, num_classes), dtype=np.int64)
-    cm_4 = np.zeros((4, 4), dtype=np.int64)
-    latencies = []
+    acc = _BandStats(num_classes)
     n_samples = 0
-
-    band_cms_5 = {b: np.zeros((num_classes, num_classes), dtype=np.int64) for b in DISTANCE_BANDS}
-    band_cms_4 = {b: np.zeros((4, 4), dtype=np.int64) for b in DISTANCE_BANDS}
 
     with torch.inference_mode():
         for batch_idx, batch in enumerate(val_loader):
@@ -106,51 +152,20 @@ def evaluate_pixel_level(model, val_loader, device, num_classes, use_amp, max_ra
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             t1 = time.perf_counter()
-            latencies.append((t1 - t0) * 1000.0)
+            latency_ms = (t1 - t0) * 1000.0
 
             preds_5 = logits.argmax(dim=1).cpu().numpy()
             tgts_5 = li_batch.numpy()
-            preds_4 = bin_5_to_4(preds_5)
-            tgts_4 = bin_5_to_4(tgts_5)
-
             ri_np = ri_batch.numpy()
             for b in range(preds_5.shape[0]):
-                update_confusion(cm_5, preds_5[b], tgts_5[b])
-                update_confusion(cm_4, preds_4[b], tgts_4[b])
-
                 ranges = ri_np[b, 0] * max_range
-                for lo, hi in DISTANCE_BANDS:
-                    mask = (ranges >= lo) & (ranges < hi)
-                    if mask.any():
-                        update_confusion(band_cms_5[(lo, hi)], preds_5[b][mask], tgts_5[b][mask])
-                        update_confusion(band_cms_4[(lo, hi)], preds_4[b][mask], tgts_4[b][mask])
+                acc.observe(preds_5[b], tgts_5[b], ranges=ranges, latency_ms=latency_ms)
 
             n_samples += preds_5.shape[0]
             if (batch_idx + 1) % 20 == 0:
                 print(f"  pixel: {n_samples} samples ({batch_idx + 1} batches)")
 
-    miou_5, ci_5 = miou_from_confusion(cm_5)
-    miou_4, ci_4 = miou_from_confusion(cm_4)
-
-    band_5, band_4 = {}, {}
-    for (lo, hi), name in zip(DISTANCE_BANDS, BAND_NAMES):
-        m5, c5 = miou_from_confusion(band_cms_5[(lo, hi)])
-        m4, c4 = miou_from_confusion(band_cms_4[(lo, hi)])
-        band_5[name] = {"miou": m5, "class_ious": dict(zip(CLASS_NAMES_5, _safe_floats(c5)))}
-        band_4[name] = {"miou": m4, "class_ious": dict(zip(CLASS_NAMES_4, _safe_floats(c4)))}
-
-    return {
-        "n_samples": n_samples,
-        "miou_5class": miou_5,
-        "miou_4class": miou_4,
-        "class_ious_5": dict(zip(CLASS_NAMES_5, _safe_floats(ci_5))),
-        "class_ious_4": dict(zip(CLASS_NAMES_4, _safe_floats(ci_4))),
-        "per_distance_band_5class": band_5,
-        "per_distance_band_4class": band_4,
-        "confusion_5class": cm_5.tolist(),
-        "confusion_4class": cm_4.tolist(),
-        "latency_ms": _latency_stats(latencies),
-    }
+    return acc.result("n_samples", n_samples)
 
 
 def evaluate_point_level(seq_dir, checkpoint, model_cfg, train_cfg,
@@ -193,13 +208,8 @@ def evaluate_point_level(seq_dir, checkpoint, model_cfg, train_cfg,
 
     eval_files = bin_files[:limit] if limit else bin_files
 
-    cm_5 = np.zeros((num_classes, num_classes), dtype=np.int64)
-    cm_4 = np.zeros((4, 4), dtype=np.int64)
-    latencies = []
+    acc = _BandStats(num_classes)
     n_scans = 0
-
-    band_cms_5 = {b: np.zeros((num_classes, num_classes), dtype=np.int64) for b in DISTANCE_BANDS}
-    band_cms_4 = {b: np.zeros((4, 4), dtype=np.int64) for b in DISTANCE_BANDS}
 
     for bf in eval_files:
         points = np.fromfile(str(bf), dtype=np.float32).reshape(-1, 4)
@@ -216,43 +226,16 @@ def evaluate_point_level(seq_dir, checkpoint, model_cfg, train_cfg,
 
         valid = gt_5 != 255
         if valid.any():
-            update_confusion(cm_5, pred_5[valid], gt_5[valid])
-            update_confusion(cm_4, bin_5_to_4(pred_5[valid]), gt_4[valid])
-
             ranges = np.sqrt(np.sum(points[:, :3] ** 2, axis=1))
-            for lo, hi in DISTANCE_BANDS:
-                rmask = valid & (ranges >= lo) & (ranges < hi)
-                if rmask.any():
-                    update_confusion(band_cms_5[(lo, hi)], pred_5[rmask], gt_5[rmask])
-                    update_confusion(band_cms_4[(lo, hi)], bin_5_to_4(pred_5[rmask]), gt_4[rmask])
+            acc.observe(pred_5[valid], gt_5[valid], ranges=ranges[valid], latency_ms=timings["total"])
+        else:
+            acc.latencies.append(timings["total"])
 
-        latencies.append(timings["total"])
         n_scans += 1
         if n_scans % 50 == 0:
             print(f"  point: {n_scans}/{len(eval_files)} scans")
 
-    miou_5, ci_5 = miou_from_confusion(cm_5)
-    miou_4, ci_4 = miou_from_confusion(cm_4)
-
-    band_5, band_4 = {}, {}
-    for (lo, hi), name in zip(DISTANCE_BANDS, BAND_NAMES):
-        m5, c5 = miou_from_confusion(band_cms_5[(lo, hi)])
-        m4, c4 = miou_from_confusion(band_cms_4[(lo, hi)])
-        band_5[name] = {"miou": m5, "class_ious": dict(zip(CLASS_NAMES_5, _safe_floats(c5)))}
-        band_4[name] = {"miou": m4, "class_ious": dict(zip(CLASS_NAMES_4, _safe_floats(c4)))}
-
-    return {
-        "n_scans": n_scans,
-        "miou_5class": miou_5,
-        "miou_4class": miou_4,
-        "class_ious_5": dict(zip(CLASS_NAMES_5, _safe_floats(ci_5))),
-        "class_ious_4": dict(zip(CLASS_NAMES_4, _safe_floats(ci_4))),
-        "per_distance_band_5class": band_5,
-        "per_distance_band_4class": band_4,
-        "confusion_5class": cm_5.tolist(),
-        "confusion_4class": cm_4.tolist(),
-        "latency_ms": _latency_stats(latencies),
-    }
+    return acc.result("n_scans", n_scans)
 
 
 def plot_confusion_matrices(cm_5, cm_4, output_dir):

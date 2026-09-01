@@ -5,12 +5,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.data.projection import (
-    build_range_image,
-    build_range_image_gpu,
-    compute_projection,
-    project_points_gpu,
-)
+from src.data.projection import make_projector
 from src.models.unet import RangeImageUNet
 
 
@@ -33,16 +28,12 @@ class Segmenter:
         device: str | None = None,
         precision: str | None = None,
     ):
-        self.h = h
-        self.w = w
-        self.fov_top_deg = fov_top_deg
-        self.fov_bottom_deg = fov_bottom_deg
-        self.max_range = max_range
-        self.num_classes = num_classes
-
         from src.common.config import resolve_device, resolve_precision
         self.precision = resolve_precision(precision)
         self.device = torch.device(resolve_device(device))
+        self.h, self.w = h, w
+        self.projector = make_projector(
+            self.device, h, w, fov_top_deg, fov_bottom_deg, max_range)
 
         self.model = RangeImageUNet(
             in_channels=in_channels,
@@ -70,51 +61,21 @@ class Segmenter:
 
         print(f"[Segmenter] loaded {ckpt_path} (best_miou={ckpt.get('best_miou', 'n/a'):.4f}) on {self.device} precision={self.precision}")
 
-        # Lazy-allocated pinned host buffer for async (non_blocking) H2D copies,
-        # so the CPU thread never stalls submitting the point cloud to the GPU.
-        self._pin = None  # np.ndarray (n,4) float32, pinned via torch.zeros(..., pin_memory=True)
-
-    def _pin_buffer(self, n: int) -> np.ndarray:
-        """Return a pinned float32 (n,4) host buffer large enough for n points."""
-        if self._pin is None or self._pin.shape[0] < n:
-            self._pin = torch.zeros((n, 4), dtype=torch.float32, pin_memory=True).numpy()
-        return self._pin
-
     @torch.inference_mode()
     def segment(self, points: np.ndarray) -> tuple[np.ndarray, dict]:
         """Returns (per_point_class_ids [N] uint8 in [0,num_classes), timings dict).
 
-        Timings sub-fields (ms): project (H2D + projection + range image),
-        forward (UNet + softmax + knn gather), sync (argmax + device->host copy).
-        On CUDA the H2D copy is asynchronous (non_blocking) so submitting it does
-        not stall the CPU; the only blocking device sync is the final .cpu().
+        Timings sub-fields (ms): project (projection + range image via the device
+        Projector), forward (UNet + softmax + knn gather), sync (argmax + device->host
+        copy). On CUDA the H2D copy is asynchronous (non_blocking) so submitting it
+        does not stall the CPU; the only blocking device sync is the final .cpu().
         """
         t = {"project": 0.0, "forward": 0.0, "sync": 0.0, "total": 0.0}
         if points.shape[0] == 0 or points.shape[1] < 4:
             return np.zeros(0, dtype=np.uint8), {"project": 0.0, "forward": 0.0, "sync": 0.0, "total": 0.0}
 
         t0 = time.perf_counter()
-        if self.device.type == "cuda":
-            # Async H2D from a pinned buffer: submitting the copy does not block
-            # the CPU; only the final .cpu() below synchronizes with the GPU stream.
-            pin = self._pin_buffer(points.shape[0])
-            pin_view = pin[: points.shape[0]]
-            np.copyto(pin_view, points[:, :4])
-            pts = torch.from_numpy(pin_view).to(self.device, non_blocking=True)
-            row, col, r = project_points_gpu(pts, h=self.h, w=self.w,
-                                             fov_top_deg=self.fov_top_deg,
-                                             fov_bottom_deg=self.fov_bottom_deg)
-            ri = build_range_image_gpu(pts, row, col, r, h=self.h, w=self.w,
-                                       max_range=self.max_range)
-            proj_t = torch.stack((row, col), dim=1).unsqueeze(0)
-        else:
-            proj, ranges = compute_projection(points, h=self.h, w=self.w,
-                                              fov_top_deg=self.fov_top_deg,
-                                              fov_bottom_deg=self.fov_bottom_deg)
-            ri = build_range_image(points, proj, points[:, 3], ranges, h=self.h, w=self.w,
-                                   max_range=self.max_range)
-            ri = torch.from_numpy(np.ascontiguousarray(ri))
-            proj_t = torch.from_numpy(proj).long().unsqueeze(0)
+        ri, proj_t = self.projector.project(points)
         t1 = time.perf_counter()
         t["project"] = (t1 - t0) * 1000.0
 
