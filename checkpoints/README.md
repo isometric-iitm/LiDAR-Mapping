@@ -2,18 +2,18 @@
 
 | File | Size | Tracked in git? | Notes |
 |------|------|-----------------|-------|
-| `best_miou.pt` | 149 MB | No (gitignored via `*.pt`) | Trained range-image UNet; used by the live pipeline (`config/pipeline.yaml` → `model.checkpoint`) and eval |
+| `best_miou.pt` | 143 MB | No (gitignored via `*.pt`) | Trained range-image UNet; used by the live pipeline (`config/pipeline.yaml` → `model.checkpoint`) and eval |
 | `history.jsonl` | 42 KB | Yes | Training metrics log; powers the `/training` dashboard (`TrainingCurves.tsx`) |
 
 ## Why is `best_miou.pt` not committed?
 
-It is a **149 MB binary** — too large to track in plain git. Adding binary blobs of this size bloats the repository and slows every clone.
+It is a **143 MB binary** — too large to track in plain git. Adding binary blobs of this size bloats the repository and slows every clone.
 
 ## Delivery: GitHub Release (not Git LFS)
 
 Checkpoints are delivered as a **GitHub Release asset**, deliberately **not** via Git LFS.
 
-Rationale: models can grow well beyond 149 MB. Git LFS has free bandwidth quotas that larger models can exceed and adds a mandatory client-side dependency for every collaborator. A Release asset has no per-download quota at these sizes and requires no LFS setup — anyone can fetch it with a plain HTTPS request.
+Rationale: models can grow well beyond 143 MB. Git LFS has free bandwidth quotas that larger models can exceed and adds a mandatory client-side dependency for every collaborator. A Release asset has no per-download quota at these sizes and requires no LFS setup — anyone can fetch it with a plain HTTPS request.
 
 ### How judges get the model (one command)
 
@@ -27,7 +27,7 @@ This writes `checkpoints/best_miou.pt` (same file judges would need either way).
 `https://github.com/isometric-iitm/LiDAR-Mapping/releases/download/v1.0.0/best_miou.pt`
 Pass `--url` to override. See `scripts/download_checkpoint.py --help` for options (`--url`, `--out`, `--force`).
 
-> Current model: **v1.0.0** published (`best_miou.pt`, mIoU 84.8%).
+> Current model: **v1.0.0** published (`best_miou.pt`, mIoU 80.9% 4-class pixel-level on full val set).
 
 ### How to publish a NEWER checkpoint
 

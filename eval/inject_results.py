@@ -78,7 +78,9 @@ def format_results(data):
     lines.append("|--------|-------|")
     lines.append(f"| Peak RSS | {mem.get('peak_rss_mb', 0):.1f} MB |")
     if mem.get("gpu_peak_mb") is not None:
-        lines.append(f"| GPU Peak | {mem['gpu_peak_mb']:.1f} MB |")
+        lines.append(f"| GPU Allocated | {mem['gpu_peak_mb']:.1f} MB |")
+    if mem.get("gpu_reserved_mb") is not None:
+        lines.append(f"| GPU Reserved | {mem['gpu_reserved_mb']:.1f} MB |")
     lines.append("")
     return "\n".join(lines)
 

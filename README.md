@@ -20,8 +20,8 @@ Real-time semantic segmentation of LiDAR point clouds projected onto a **variabl
 |---|:---:|:---:|
 | **mIoU 4-class** | **80.9%** | **82.6%** |
 | **mIoU 5-class** | 67.8% | 66.6% |
-| Latency | ~10 ms/batch | ~442 ms/batch |
-| Throughput | ~100 Hz | ~2.3 Hz |
+| Latency | 7.8 ms/batch | ~442 ms/batch |
+| Throughput | ~128 Hz | ~2.3 Hz |
 
 ### Point-level segmentation
 
@@ -29,7 +29,7 @@ Real-time semantic segmentation of LiDAR point clouds projected onto a **variabl
 |---|:---:|:---:|
 | **mIoU 4-class** | **75.8%** | **65.3%** |
 | **mIoU 5-class** | 63.3% | 52.6% |
-| Latency | ~54 ms/scan | ~243 ms/scan |
+| Latency | 59.6 ms/scan | ~243 ms/scan |
 | Throughput | ~19 Hz | ~4.1 Hz |
 
 ### Per-class IoU (4-class, GPU)
@@ -108,7 +108,7 @@ git clone https://github.com/isometric-iitm/LiDAR-Mapping.git
 cd LiDAR-Mapping/pc2d
 uv sync
 
-# 2. Download the trained checkpoint (~149 MB)
+# 2. Download the trained checkpoint (~143 MB)
 uv run python scripts/download_checkpoint.py
 
 # 3. Set your data path (SemanticKITTI sequence 08)
@@ -451,13 +451,13 @@ uv run pytest
 
 ## Checkpoint Delivery
 
-Model weights are **not committed to git** (149 MB binary). Instead they're delivered via GitHub Release:
+Model weights are **not committed to git** (143 MB binary). Instead they're delivered via GitHub Release:
 
 ```bash
 uv run python scripts/download_checkpoint.py
 ```
 
-This fetches `best_miou.pt` from [v1.0.0](https://github.com/isometric-iitm/LiDAR-Mapping/releases/tag/v1.0.0) (149 MB, mIoU 80.9% 4-class pixel-level on full val set). See `checkpoints/README.md` for publishing newer checkpoints.
+This fetches `best_miou.pt` from [v1.0.0](https://github.com/isometric-iitm/LiDAR-Mapping/releases/tag/v1.0.0) (143 MB, mIoU 80.9% 4-class pixel-level on full val set). See `checkpoints/README.md` for publishing newer checkpoints.
 
 ---
 

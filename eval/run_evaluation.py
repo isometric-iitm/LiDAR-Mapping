@@ -11,13 +11,17 @@ import json
 import os
 import sys
 import time
-import tracemalloc
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 import torch
 from dotenv import load_dotenv
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -48,13 +52,49 @@ def _safe_floats(iou_list):
 
 def _latency_stats(latencies):
     if not latencies:
-        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0}
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "median": 0.0, "p90": 0.0}
+    arr = np.array(latencies)
     return {
-        "mean": float(np.mean(latencies)),
-        "std": float(np.std(latencies)),
-        "min": float(np.min(latencies)),
-        "max": float(np.max(latencies)),
+        "mean": float(np.mean(arr)),
+        "std": float(np.std(arr)),
+        "min": float(np.min(arr)),
+        "max": float(np.max(arr)),
+        "median": float(np.median(arr)),
+        "p90": float(np.percentile(arr, 90)),
     }
+
+
+class _MemTracker:
+    """Tracks peak process RSS (MiB) using psutil when available, with a
+    tracemalloc fallback. Sampled explicitly (not on a timer) so the caller
+    controls overhead — typically once per batch/scan."""
+
+    def __init__(self):
+        self.peak_rss_mib = 0.0
+        if psutil is not None:
+            self._proc = psutil.Process()
+        else:
+            self._proc = None
+            import tracemalloc as _tm
+            _tm.start()
+            self._tm = _tm
+
+    def sample(self):
+        if self._proc is not None:
+            rss = self._proc.memory_info().rss / (1024 * 1024)
+            if rss > self.peak_rss_mib:
+                self.peak_rss_mib = rss
+        else:
+            _, peak = self._tm.get_traced_memory()
+            peak_mib = peak / (1024 * 1024)
+            if peak_mib > self.peak_rss_mib:
+                self.peak_rss_mib = peak_mib
+
+    def finish(self) -> dict:
+        self.sample()
+        if self._proc is None:
+            self._tm.stop()
+        return {"peak_rss_mb": round(self.peak_rss_mib, 1)}
 
 
 class _BandStats:
@@ -136,12 +176,31 @@ def _resolve_seq_dir(cfg, cli_override=None):
     return None
 
 
-def evaluate_pixel_level(model, val_loader, device, num_classes, use_amp, max_range, limit=None):
+def evaluate_pixel_level(model, val_loader, device, num_classes, use_amp, max_range, limit=None, mem=None):
     model.eval()
     acc = _BandStats(num_classes)
     n_samples = 0
 
     with torch.inference_mode():
+        # Warmup: run 2 forward passes on the first batch so CUDA init,
+        # cuDNN autotuner, and torch.compile (if active) finish before
+        # any latency is recorded. These iterations are not timed.
+        warmup_batch = None
+        for batch_idx, batch in enumerate(val_loader):
+            ri_batch, li_batch = batch
+            ri_gpu = ri_batch.to(device, non_blocking=True)
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                model(ri_gpu)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                model(ri_gpu)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            warmup_batch = batch
+            break
+
+        # Re-iterate from the start (including the warmup batch for mIoU).
         for batch_idx, batch in enumerate(val_loader):
             if limit is not None and batch_idx >= limit:
                 break
@@ -165,6 +224,8 @@ def evaluate_pixel_level(model, val_loader, device, num_classes, use_amp, max_ra
                 acc.observe(preds_5[b], tgts_5[b], ranges=ranges, latency_ms=latency_ms)
 
             n_samples += preds_5.shape[0]
+            if mem is not None:
+                mem.sample()
             if (batch_idx + 1) % 20 == 0:
                 print(f"  pixel: {n_samples} samples ({batch_idx + 1} batches)")
 
@@ -172,7 +233,7 @@ def evaluate_pixel_level(model, val_loader, device, num_classes, use_amp, max_ra
 
 
 def evaluate_point_level(seq_dir, checkpoint, model_cfg, train_cfg,
-                         device_str, precision, num_classes, limit=None):
+                         device_str, precision, num_classes, limit=None, mem=None):
     seq_path = Path(resolve_path(seq_dir)) if not isinstance(seq_dir, Path) else seq_dir
     velodyne_dir = seq_path / "velodyne"
     labels_dir = seq_path / "labels"
@@ -205,8 +266,14 @@ def evaluate_point_level(seq_dir, checkpoint, model_cfg, train_cfg,
         precision=precision,
     )
 
-    warmup_pts = np.random.randn(100, 4).astype(np.float32)
+    # Warmup with a realistic-sized scan (~120k points) so the CUDA kernels
+    # for the actual input shape are compiled before timing starts. The
+    # segmenter's built-in warmup only exercises the UNet forward (fixed
+    # 1×5×64×2048 shape) — this exercises the full projection+segment
+    # pipeline at live scan size.
+    warmup_pts = np.random.randn(120_000, 4).astype(np.float32)
     warmup_pts[:, 3] = 0.5
+    segmenter.segment(warmup_pts)
     segmenter.segment(warmup_pts)
 
     eval_files = bin_files[:limit] if limit else bin_files
@@ -235,6 +302,8 @@ def evaluate_point_level(seq_dir, checkpoint, model_cfg, train_cfg,
             acc.latencies.append(timings["total"])
 
         n_scans += 1
+        if mem is not None:
+            mem.sample()
         if n_scans % 50 == 0:
             print(f"  point: {n_scans}/{len(eval_files)} scans")
 
@@ -388,7 +457,7 @@ def generate_summary(results, output_dir):
         for bn, data in pixel["per_distance_band_4class"].items():
             lines.append(f"| {bn} | {data['miou']:.4f} |")
         lines.append("")
-        lines.append(f"### Latency: {pixel['latency_ms']['mean']:.1f} +/- {pixel['latency_ms']['std']:.1f} ms/batch")
+        lines.append(f"### Latency: {pixel['latency_ms']['median']:.1f} ms/batch (mean {pixel['latency_ms']['mean']:.1f} +/- {pixel['latency_ms']['std']:.1f}, p90 {pixel['latency_ms']['p90']:.1f})")
         lines.append("")
 
     point = results.get("point")
@@ -414,7 +483,7 @@ def generate_summary(results, output_dir):
         for bn, data in point["per_distance_band_4class"].items():
             lines.append(f"| {bn} | {data['miou']:.4f} |")
         lines.append("")
-        lines.append(f"### Latency: {point['latency_ms']['mean']:.1f} +/- {point['latency_ms']['std']:.1f} ms/scan")
+        lines.append(f"### Latency: {point['latency_ms']['median']:.1f} ms/scan (mean {point['latency_ms']['mean']:.1f} +/- {point['latency_ms']['std']:.1f}, p90 {point['latency_ms']['p90']:.1f})")
         lines.append("")
     else:
         lines.append("## Point-Level: Skipped (no raw data)")
@@ -425,7 +494,9 @@ def generate_summary(results, output_dir):
     lines.append("")
     lines.append(f"- **Peak RSS**: {mem.get('peak_rss_mb', 0):.1f} MB")
     if mem.get("gpu_peak_mb") is not None:
-        lines.append(f"- **GPU Peak**: {mem['gpu_peak_mb']:.1f} MB")
+        lines.append(f"- **GPU Allocated**: {mem['gpu_peak_mb']:.1f} MB")
+    if mem.get("gpu_reserved_mb") is not None:
+        lines.append(f"- **GPU Reserved**: {mem['gpu_reserved_mb']:.1f} MB")
     lines.append("")
 
     (output_dir / "eval_summary.md").write_text("\n".join(lines), encoding="utf-8")
@@ -475,7 +546,9 @@ def main():
         "memory": {},
     }
 
-    tracemalloc.start()
+    mem = _MemTracker()
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     if not args.point_only:
         print("\n--- Pixel-Level Evaluation ---")
@@ -494,6 +567,9 @@ def main():
 
             val_loader = create_val_loader(str(processed_root), batch_size=1, num_workers=0)
 
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
+
             model = RangeImageUNet(
                 in_channels=model_cfg.get("in_channels", 5),
                 num_classes=num_classes,
@@ -508,12 +584,12 @@ def main():
                 model.half()
 
             pixel_results = evaluate_pixel_level(
-                model, val_loader, device, num_classes, use_amp, max_range, args.limit)
+                model, val_loader, device, num_classes, use_amp, max_range, args.limit, mem=mem)
             results["pixel"] = pixel_results
 
             print(f"  mIoU 5-class: {pixel_results['miou_5class']:.4f}")
             print(f"  mIoU 4-class: {pixel_results['miou_4class']:.4f}")
-            print(f"  Latency: {pixel_results['latency_ms']['mean']:.1f} +/- {pixel_results['latency_ms']['std']:.1f} ms/batch")
+            print(f"  Latency: {pixel_results['latency_ms']['median']:.1f} ms/batch (mean {pixel_results['latency_ms']['mean']:.1f} +/- {pixel_results['latency_ms']['std']:.1f}, p90 {pixel_results['latency_ms']['p90']:.1f})")
 
             del model, ckpt_data
             if device.type == "cuda":
@@ -539,19 +615,24 @@ def main():
                     precision=precision,
                     num_classes=num_classes,
                     limit=args.limit,
+                    mem=mem,
                 )
                 if point_results is not None:
                     results["point"] = point_results
                     print(f"  mIoU 5-class: {point_results['miou_5class']:.4f}")
                     print(f"  mIoU 4-class: {point_results['miou_4class']:.4f}")
-                    print(f"  Latency: {point_results['latency_ms']['mean']:.1f} +/- {point_results['latency_ms']['std']:.1f} ms/scan")
+                    print(f"  Latency: {point_results['latency_ms']['median']:.1f} ms/scan (mean {point_results['latency_ms']['mean']:.1f} +/- {point_results['latency_ms']['std']:.1f}, p90 {point_results['latency_ms']['p90']:.1f})")
 
-    current, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-    results["memory"]["peak_rss_mb"] = peak / 1e6
-    results["memory"]["gpu_peak_mb"] = (
-        torch.cuda.max_memory_allocated(device) / 1e6 if device.type == "cuda" else None
-    )
+    mem_results = mem.finish()
+    results["memory"]["peak_rss_mb"] = mem_results["peak_rss_mb"]
+    if device.type == "cuda":
+        alloc_mib = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
+        reserved_mib = torch.cuda.max_memory_reserved(device) / (1024 * 1024)
+        results["memory"]["gpu_peak_mb"] = round(alloc_mib, 1)
+        results["memory"]["gpu_reserved_mb"] = round(reserved_mib, 1)
+    else:
+        results["memory"]["gpu_peak_mb"] = None
+        results["memory"]["gpu_reserved_mb"] = None
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     json_path = output_dir / f"eval_{ts}.json"
