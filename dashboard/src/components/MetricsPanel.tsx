@@ -121,7 +121,7 @@ export default function MetricsPanel({
   onViewMode: (v: ViewMode) => void;
   pointSize: number;
   onPointSize: (s: number) => void;
-  hover: { cls: string; clsColor: string; zMax: number; zMean: number; occ: number; dyn: number; trav: number; r: number; deg: number; cellWidth: string } | null;
+  hover: { cls: string; clsColor: string; zMax: number; zMean: number; occ: number; trav: number; r: number; deg: number; cellWidth: string } | null;
 }) {
 
   // Log-scale memory bar widths so a ~KB grid stays proportionally visible
@@ -281,7 +281,6 @@ export default function MetricsPanel({
           <CellStat k="Mean z" v={hover ? `${hover.zMean.toFixed(2)}m` : "-"} />
           <CellStat k="Width" v={hover ? hover.cellWidth : "-"} />
           <CellStat k="Occ" v={hover ? `${(hover.occ * 100).toFixed(0)}%` : "-"} />
-          <CellStat k="Dyn" v={hover ? `${(hover.dyn * 100).toFixed(0)}%` : "-"} />
           <CellStat k="Trav" v={hover ? `${(hover.trav * 100).toFixed(0)}%` : "-"} />
         </div>
       </div>

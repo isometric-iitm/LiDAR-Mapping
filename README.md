@@ -3,7 +3,7 @@
 [![Python 3.14](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org/)
 [![PyTorch 2.11](https://img.shields.io/badge/PyTorch-2.11-ee4c2c.svg)](https://pytorch.org/)
 [![Next.js 16](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org/)
-[![Tests 110 passing](https://img.shields.io/badge/tests-110%20passing-brightgreen.svg)](#testing)
+[![Tests 128 passing](https://img.shields.io/badge/tests-128%20passing-brightgreen.svg)](#testing)
 
 Real-time semantic segmentation of LiDAR point clouds projected onto a **variable-resolution log-polar 2.5D grid**, streamed over binary WebSocket to an interactive 3D dashboard. Built on SemanticKITTI, powered by a range-image UNet.
 
@@ -196,7 +196,7 @@ pc2d/
 ├── config/                   # YAML configs (env overrides via PC2D_* vars)
 │   ├── pipeline.yaml         #   live streaming pipeline
 │   ├── train_range_image.yaml#   training / preprocessing
-│   ├── grid.yaml             #   log-polar grid geometry + decay
+│   ├── grid.yaml             #   log-polar grid geometry + occupancy knobs
 │   └── classes.yaml          #   semantic_kitti_5class + bin_5_to_4 mapping
 ├── src/
 │   ├── common/config.py      # load_config, resolve_path, resolve_device/precision
@@ -211,11 +211,11 @@ pc2d/
 │   │   ├── lovasz.py         # CombinedLoss (CE + Lovasz-Softmax)
 │   │   └── predict.py        # Segmenter (end-to-end: project → forward → KNN)
 │   ├── grid_engine/
-│   │   ├── logpolar_grid.py  # LogPolarGrid (~469K cells, ~22 MB, two-phase, decay, delta, JIT-accelerated reduce)
+│   │   ├── logpolar_grid.py  # LogPolarGrid (~469K cells, ~22 MB, two-phase, pure-delta, JIT-accelerated reduce)
 │   │   └── jit_reduce.py     # numba fused per-cell scatter-reduce (min/max/sum/count/class)
 │   └── server/
 │       ├── app.py            # FastAPI + two-stage Pipeline (SEG thread + GRID thread) + WS endpoints
-│       └── ws_protocol.py   # Binary framing (magic 0x50433244, v2)
+│       └── ws_protocol.py   # Binary framing (magic 0x50433244, v3)
 ├── eval/
 │   ├── run_evaluation.py     # pixel + point mIoU, per-distance-band, latency
 │   └── inject_results.py     # auto-inject eval results into this README
@@ -224,7 +224,7 @@ pc2d/
 │   ├── preprocess_to_shards.py  # raw .bin → tar shards (ri + li)
 │   ├── download_checkpoint.py# fetch best_miou.pt from GitHub Release
 │   └── export_onnx.py        # export UNet to ONNX (opset 17)
-├── tests/                    # 110 tests (see Testing section)
+├── tests/                    # 128 tests (see Testing section)
 ├── results/                  # eval outputs (JSON, PNG, MD)
 ├── checkpoints/              # best_miou.pt (gitignored), history.jsonl
 ├── dashboard/                # Next.js 16 real-time dashboard (see dashboard/README.md)
@@ -252,16 +252,19 @@ The core innovation: a **two-phase** ring geometry. Phase 1 keeps uniform **5 cm
 | Resulting rings | ~652 | Phase 1 + Phase 2 |
 | Resulting cells | ~469K | rings × sectors |
 
-### Temporal dynamics
+### Per-frame occupancy (precise sensor mode only)
+
+The grid is strictly per-frame — occupancy is this scan's sensor truth, nothing
+more. There is no temporal decay/EMA: any cell not hit this scan goes free the
+instant it leaves the sensor view, so stale cells never linger (no ghosts on the
+dashboard).
 
 | Feature | Mechanism | Parameter |
 |---------|-----------|-----------|
-| Occupancy decay | `occ *= exp(-dt / tau_free)` (decay mode) | `tau_free = 1.5 s` |
-| Occupancy gain | `occ += (1 - occ) * gain` on hit (decay mode) | `gain = 1.0` (precise mode; decay uses `occupancy_gain = 1.0`) |
-| Rendered threshold | `occ > 0.2` | - |
+| Occupancy on hit | binary hit = `occ_gain` for this scan's cells | `occupancy_gain = 1.0` |
+| Enter/leave render | `occ > occ_threshold` | `occ_threshold = 0.2` |
+| Freeing | anything not hit this scan → `occ = 0` immediately | - |
 | Ground reference | 20th percentile of z in 1.5-15 m | auto-tracked per frame |
-
-> Default is **precise sensor mode** (`decay.enabled = false`): no temporal decay, occupancy is per-frame sensor truth. Setting `decay.enabled = true` enables the exponential decay / EMA semantics above.
 
 ---
 
@@ -426,21 +429,23 @@ Large frames split at 8,000 cells / 30,000 cloud points. The epoch field lets th
 uv run pytest
 ```
 
-110 tests across 11 files, zero dependency on external data paths:
+128 tests across 13 files, zero dependency on external data paths:
 
 | Test file | Tests | Coverage |
 |-----------|-------|----------|
-| `test_grid_geometry.py` | 18 | Ring/sector indexing, cell counts, memory report, round-trip xy→cell |
-| `test_projection.py` | 7 | CPU/GPU parity, nearest-wins, KNN back-projection, edge cases |
-| `test_label_mapping.py` | 8 | remap_labels, bin_5_to_4, compute_class_weights |
-| `test_grid_update.py` | 5 | Occupancy decay, snapshot/delta invariants, reset |
-| `test_ws_protocol.py` | 4 | Binary header magic/codes, 32-byte row layout (v2) |
+| `test_grid_geometry.py` | 26 | Ring/sector indexing, cell counts, memory report, round-trip xy→cell |
+| `test_projection.py` | 10 | CPU/GPU parity, nearest-wins, KNN back-projection, numba JIT parity, edge cases |
+| `test_label_mapping.py` | 9 | remap_labels, bin_5_to_4, compute_class_weights |
+| `test_grid_update.py` | 8 | Per-frame occupancy (precise), snapshot/delta compute/commit invariants, dropped-delta recompute, reset |
+| `test_ws_protocol.py` | 8 | Binary header magic/codes, 28-byte row layout (v3), raw-deflate wire compression round-trip |
 | `test_jit_reduce.py` | 4 | numba fused reduce vs numpy equivalence, single-point/segment/class tallies |
 | `test_segmenter_cpu.py` | 3 | Empty scan, synthetic scan, CPU device |
 | `test_e2e_replay.py` | 5 | Replayer seek, pipeline seek-reset + epoch guard |
+| `test_ws_reliability.py` | 6 | Lossless pure-delta drops, catchup snapshot threshold, client-state convergence |
 | `test_evaluation.py` | 25 | Eval helpers, path resolution, synthetic pixel eval, plots, inject |
 | `test_traversability.py` | 6 | Flat drivable, steep blocked, class scores, tiers, grid integration |
-| `test_harness.py` | 21 | Fixture smoke tests, projection, grid geometry |
+| `test_harness.py` | 12 | Fixture smoke tests, projection, grid geometry |
+| `test_replayer_prefetch.py` | 6 | Bounded prefetch buffer, natural cadence, seek invalidation, loop wrap |
 
 ---
 

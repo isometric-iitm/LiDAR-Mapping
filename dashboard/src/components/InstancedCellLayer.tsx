@@ -17,7 +17,6 @@ export type CellInfo = {
   zMax: number;
   cls: number;
   occ: number;
-  dyn: number;
   trav: number;
   pos: [number, number, number];
 };
@@ -155,15 +154,24 @@ function InstancedCells({
     }
 
     const writeCell = (cell: Cell): boolean => {
-      const [i, j, zMean, zMax, cls, occ, dyn, trav] = cell;
+      const [i, j, zMean, zMax, cls, occ, trav] = cell;
       if (!Number.isFinite(zMax) || !Number.isFinite(zMean)) return false;
       if (i < 0 || i >= meta.n_rings || j < 0 || j >= meta.n_theta) return false;
       const key = keyOf(i, j, meta.n_theta);
       const prevSlot = c.slotOf.get(key);
       const prev = prevSlot !== undefined ? c.geo[prevSlot] : null;
-      // Dirty-skip on sensor truth only (no trav/dyn cache) - keeps per-frame
-      // accuracy (instant free every scan) but avoids re-pushing unchanged cells.
-      if (prev && prev.zMax === zMax && prev.zMean === zMean && prev.occ === occ && prev.cls === cls) {
+      // Dirty-skip on the exact display inputs (height, class, occ, trav).
+      // trav is wired to the per-instance colour in trav mode, so it must be
+      // part of the dirty key (a trav change with unchanged geometry would
+      // otherwise never recolor). Occ drives alpha/brightness.
+      if (
+        prev &&
+        prev.zMax === zMax &&
+        prev.zMean === zMean &&
+        prev.occ === occ &&
+        prev.cls === cls &&
+        prev.trav === trav
+      ) {
         return false;
       }
       let b = c.base.get(key);
@@ -233,7 +241,6 @@ function InstancedCells({
       g.zMax = zMax;
       g.cls = cls;
       g.occ = occ;
-      g.dyn = dyn;
       g.trav = trav;
       g.pos = [b.posX, posY, b.posZ];
       g.rotY = secA.th;
@@ -279,6 +286,55 @@ function InstancedCells({
       return n;
     };
 
+    // Add any cell that is in the authoritative map but has no renderer slot
+    // (the inverse of freeStale) — heals rows lost across a dropped frame that
+    // the server or a missed chunk couldn't deliver. Bounded per call so a
+    // poisoned map can never stall a frame indefinitely.
+    const healMissing = (caps: number): number => {
+      let n = 0;
+      for (const cell of cells.values()) {
+        if (n >= caps) break;
+        const key = keyOf(cell[0], cell[1], meta.n_theta);
+        if (!c.slotOf.has(key)) {
+          if (writeCell(cell)) n++;
+        }
+      }
+      return n;
+    };
+
+    // Compacts the slot layout when the recycled-free list has grown large
+    // relative to the live count, so mesh.count (the GPU instance buffer width)
+    // tracks the live scene instead of the historic high-water mark that would
+    // otherwise climb toward MAX_INSTANCES and never come back down. Rebuilds
+    // `slotOf` so live cells occupy the lowest contiguous slots. O(live) —
+    // only run periodically (on snapshots) to bound cost.
+    const compactSlots = (): boolean => {
+      if (c.free.length < 256 || c.free.length < c.slotOf.size) return false;
+      const reindex = new Map<number, number>();
+      const geo: (CellGeo | null)[] = [];
+      const oldSlotOf = c.slotOf;
+      for (const [key, oldSlot] of oldSlotOf) {
+        const g = c.geo[oldSlot];
+        if (!g) continue;
+        const newSlot = geo.length;
+        reindex.set(key, newSlot);
+        geo.push(g);
+      }
+      // move geometry arrays into their new compacted slots
+      const oldGeo = c.geo;
+      for (let slot = 0; slot < geo.length; slot++) {
+        oldGeo[slot] = geo[slot];
+      }
+      for (let slot = geo.length; slot < c.next; slot++) {
+        oldGeo[slot] = null;
+      }
+      c.slotOf = reindex;
+      c.geo = oldGeo;
+      c.free = [];
+      c.next = geo.length;
+      return true;
+    };
+
     let dirty = false;
     let matDirty = false;
     let colDirty = false;
@@ -295,14 +351,17 @@ function InstancedCells({
       for (const cell of patch.upserts) { if (writeCell(cell)) written++; dirty = true; }
       for (const [i, j] of patch.frees) { if (freeCell(i, j)) { freed_count++; dirty = true; matDirty = true; colDirty = true; } }
       // Belt-and-suspenders ghost healing: if deltas jumped over dropped frames,
-      // some upserts/frees may have been lost even with server retransmit (e.g.
-      // a socket hiccup). Free any renderer slot whose cell is no longer in the
-      // authoritative map, so stale boxes don't linger until the next snapshot.
+      // some cells may have been lost on the wire. Free renderer slots whose
+      // cell is no longer authoritative, and (bounded) add authoritative cells
+      // that have no slot, so no ghosts linger and no cells go missing until the
+      // next snapshot.
       if (lastRenderedFrame.current >= 0 && patch.frame - lastRenderedFrame.current > 1) {
         const healed = freeStale();
         if (healed > 0) {
           freed_count += healed; dirty = true; matDirty = true; colDirty = true;
         }
+        const added = healMissing(5000);
+        if (added > 0) { written += added; dirty = true; }
       }
       lastRenderedFrame.current = patch.frame;
     } else {
@@ -317,6 +376,10 @@ function InstancedCells({
         if (!cells.has(key)) continue;
         if (writeCell(cell)) written++;
       }
+      // heal any authoritative cell still missing a slot (e.g. a dropped delta),
+      // then compact the freelist-driven high-water slot count back down.
+      written += healMissing(5000);
+      if (compactSlots()) { dirty = true; matDirty = true; colDirty = true; }
       lastRenderedFrame.current = patch.frame;
     }
     const layoutMs = performance.now() - t0;

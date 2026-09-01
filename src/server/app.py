@@ -16,7 +16,6 @@ from src.data.label_mapping import bin_5_to_4
 from src.data.replayer import SemanticKITTIReplayer
 from src.grid_engine.logpolar_grid import LogPolarGrid
 from src.models.predict import Segmenter
-from src.server import pending as pending_state
 from src.server import ws_protocol
 from src.server.broadcaster import Broadcaster
 from src.server.metrics import FrameMetrics
@@ -29,13 +28,13 @@ class Pipeline:
     frame ordering with at most 1 frame of look-ahead.     Falls back to a serial
     single-thread path when ``pipeline.stages: single`` is set in config."""
 
-    # When at least this many frames drop consecutively (or the pending
-    # retransmit volume reaches PENDING_THRESHOLD), emit a full snapshot instead
-    # of a large merged delta so the client resyncs cleanly (no transient map
-    # bloat / layout jank). Tuned well above the normal snapshot interval so the
-    # periodic snapshot path is unaffected.
-    CATCHUP_DROP_THRESHOLD = 6
-    CATCHUP_PENDING_THRESHOLD = 40_000
+    # When at least this many frames drop consecutively, emit a full snapshot
+    # instead of a delta so the client resyncs cleanly. With pure deltas a drop
+    # is never lossy (the next delta is recomputed from the last *committed*
+    # state), so this threshold only bounds how far behind a slow dashboard can
+    # fall before we force a cheap authoritative snapshot. Tuned well above the
+    # normal snapshot interval so the periodic snapshot path is unaffected.
+    CATCHUP_DROP_THRESHOLD = 4
 
     def __init__(self, cfg: dict):
         from src.common.config import resolve_path
@@ -60,32 +59,19 @@ class Pipeline:
         )
         self.grid = LogPolarGrid()
         self.grid_lock = threading.Lock()
-        # Larger queue; precise mode drops intermediate snapshots (coalesce) so
-        # 10Hz snapshots don't overflow when dashboard is briefly slow. Sized well
-        # above the typical per-frame chunk count (~7) so short disk/I/O bursts
-        # are absorbed instead of dropping frames; any frames that DO drop are now
-        # re-transmitted losslessly via _pending_upsert/_pending_free.
+        # Small bounded queue: with pure deltas, dropping a frame is never lossy
+        # (the next delta is recomputed from the last *committed* state), so the
+        # queue only needs to absorb a short disk/I/O burst, not a long backlog.
+        # Backpressure trips the catchup snapshot quickly instead of letting the
+        # dashboard fall far behind a wall of stale intermediate frames.
         self.broadcaster = Broadcaster(
-            maxsize=128, wire_compress=bool(self.cfg["server"].get("wire_compress", False))
+            maxsize=32, wire_compress=bool(self.cfg["server"].get("wire_compress", False))
         )
         self.pause_event = threading.Event()
-        # Flat cell indices (i*n_theta+j) whose `freed` was computed by delta()
-        # but whose outgoing frame was dropped by the queue (overflow). Merged
-        # into the next successfully-emitted delta so the client never loses a
-        # free (the source of ghost cells). Cleared on snapshot / seek.
-        self._pending_free: set = set()
-        # Flat cell indices (i*n_theta+j) whose `added`/`changed` rows were
-        # computed by delta() but whose outgoing frame was dropped by the queue.
-        # Unlike `_pending_free` (only frees), there is no server-side guard for
-        # lost upserts, so a dropped delta leaves the client permanently missing
-        # those cells until the next full snapshot. Merged into the next
-        # successfully-emitted delta, mirroring `_pending_free`. Cleared on a
-        # successful snapshot / seek.
-        self._pending_upsert: set = set()
         # Consecutive frames dropped by the broadcast queue without a single
-        # successful send. When this (or the pending retransmit volume) grows
-        # large, a full snapshot is emitted instead of a giant merged delta so
-        # the client resyncs cleanly (no transient map bloat / layout jank).
+        # successful send. When this grows large, a full snapshot is emitted so
+        # the client resyncs cleanly (a giant cumulative delta would cost more
+        # wire bytes than the snapshot it replaces).
         self._consecutive_drops = 0
         # start paused: the dashboard must explicitly press Play (auto-play
         # off on page load). Seek previews still render one frame while paused.
@@ -185,8 +171,6 @@ class Pipeline:
         self._cloud_hist.clear()
         self.metrics.reset()
         self.epoch += 1
-        self._pending_free.clear()
-        self._pending_upsert.clear()
         self._consecutive_drops = 0
         with self._seek_lock:
             self._preview = True
@@ -224,8 +208,6 @@ class Pipeline:
         self.metrics.reset()
         self.broadcaster.frames_emitted = 0
         self.broadcaster.frames_dropped = 0
-        self._pending_free.clear()
-        self._pending_upsert.clear()
         self._consecutive_drops = 0
         self.broadcaster.clear()
         self._drain_prefetch()
@@ -356,29 +338,17 @@ class Pipeline:
         with self.grid_lock:
             self.grid.update(frame.points, cls4)
             t_update = time.perf_counter()
-            # Both precise and decay modes respect snapshot_interval_frames:
-            # send full snapshot periodically, deltas in between.
-            # This avoids O(n_cells) snapshot cost every frame in precise mode.
-            # When a burst of frames has been dropped (large retransmit backlog),
-            # a full snapshot is emitted instead of a giant merged delta so the
-            # client resyncs cleanly (no transient map bloat / layout jank).
+            # Pure extraction: compute (but do NOT commit) either a periodic
+            # snapshot or an incremental delta from the current grid state.
+            # Sent-tracking is committed only after the frame is actually
+            # queued, so a dropped frame is recomputed from the last committed
+            # state next iteration — no pending/retransmit bookkeeping needed.
             if self._should_snapshot(snap_iv):
-                snap = self.grid.snapshot()
+                snap = self.grid.compute_snapshot()
                 is_snap = True
-                self._last_snapshot_frame = self.grid.frame
-                self._consecutive_drops = 0
             else:
-                snap = self.grid.delta()
+                snap = self.grid.compute_delta()
                 is_snap = False
-                # Merge frees that were computed but dropped earlier (queue
-                # overflow) into this delta so the client never loses a free
-                # (the source of ghost cells). Doing it under the lock keeps
-                # the rendered-mask read consistent with delta().
-                snap["freed"] = self._merge_pending_free(snap["freed"])
-                # Merge re-send upserts computed but dropped earlier into this
-                # delta, mirroring _merge_pending_free, so no added/changed cell
-                # is lost to the client (the other half of the ghost story).
-                snap["rows"], snap["cls"] = self._merge_pending_upsert(snap["rows"], snap["cls"])
             t_snap = time.perf_counter()
             if self.grid.frame - self._last_stats_frame >= stats_iv:
                 # Recompute every interval so rendered KB / compression reflect live scene (was cached static)
@@ -394,42 +364,33 @@ class Pipeline:
         yaw_cd = self._yaw_cd(frame.idx)
         n_rows = snap["rows"].shape[0]
         if is_snap:
-            # A snapshot is authoritative: the client fully resyncs, so any
-            # previously-pending frees AND upserts are subsumed. Clear them once
-            # we actually manage to send it (dropped snapshots keep them).
             freed = np.zeros((0, 2), dtype=np.float32)
             frames = list(ws_protocol.iter_snapshot_frames(
                 snap["frame"], self.epoch, snap["rows"], snap["cls"], yaw_cd=yaw_cd))
-            sent = self.broadcaster.emit_frame(frames, "binary")
-            if sent:
-                self._pending_free.clear()
-                self._pending_upsert.clear()
-                self._consecutive_drops = 0
-            else:
-                self._consecutive_drops += 1
         else:
-            # snap["freed"] was already merged with pending frees (under lock).
             freed = snap["freed"]
             frames = list(ws_protocol.iter_delta_frames(
                 snap["frame"], self.epoch, snap["rows"], snap["cls"], freed, yaw_cd=yaw_cd))
-            sent = self.broadcaster.emit_frame(frames, "binary")
-            if sent:
-                self._consecutive_drops = 0
-            else:
-                # Frame dropped wholesale — preserve its upserts (new + any
-                # already-merged pending) and its frees for the next successful
-                # delta (cells are still never-sent / not-rendered), so neither
-                # missing cells nor ghost cells are introduced by the drop.
-                self._consecutive_drops += 1
-                self._pending_upsert |= self._rows_to_flat(snap["rows"])
-                if freed.shape[0]:
-                    self._pending_free |= self._free_to_flat(freed)
+        sent = self.broadcaster.emit_frame(frames, "binary")
+        if sent:
+            # Commit sent-tracking only now that the frame is actually queued;
+            # the next delta is derived from this committed state, so nothing is
+            # ever lost or re-sent twice.
+            with self.grid_lock:
+                if is_snap:
+                    self.grid.commit_snapshot()
+                    self._last_snapshot_frame = self.grid.frame
+                else:
+                    self.grid.commit_delta(snap)
+            self._consecutive_drops = 0
+            if not self._first_frame_emitted:
+                self._first_frame_emitted = True
+                self.broadcaster.emit({"type": "status", "state": "ready", "msg": "Streaming", "seq_id": self.seq_id}, "text")
+        else:
+            self._consecutive_drops += 1
         n_freed = freed.shape[0]
         n_chunks = len(frames)
         wire_bytes = sum(len(b) for b in frames)
-        if not self._first_frame_emitted:
-            self._first_frame_emitted = True
-            self.broadcaster.emit({"type": "status", "state": "ready", "msg": "Streaming", "seq_id": self.seq_id}, "text")
         t_pack = time.perf_counter()
 
         # cloud only streams while a cloud view is active
@@ -515,37 +476,14 @@ class Pipeline:
             except queue.Empty:
                 break
 
-    def _free_to_flat(self, freed: np.ndarray) -> set:
-        """Convert freed rows [i,j] into a set of flat cell indices (i*n_theta+j)."""
-        return pending_state.free_to_flat(freed, self.grid.n_theta)
-
-    def _rows_to_flat(self, rows: np.ndarray) -> set:
-        """Convert upsert rows [i,j,...] into a set of flat cell indices."""
-        return pending_state.rows_to_flat(rows, self.grid.n_theta)
-
     def _should_snapshot(self, snap_iv: int) -> bool:
         """True when the frame should be sent as a full (authoritative) snapshot
-        instead of an incremental delta: either the periodic cadence is due, or a
-        burst of dropped frames / large pending retransmit backlog would
-        otherwise produce a giant merged delta (the source of transient client
-        map bloat)."""
-        return pending_state.should_snapshot(
-            self.grid.frame, self._last_snapshot_frame, snap_iv,
-            self._consecutive_drops, self._pending_free, self._pending_upsert,
-            self.CATCHUP_DROP_THRESHOLD, self.CATCHUP_PENDING_THRESHOLD)
-
-    def _merge_pending_upsert(self, rows: np.ndarray, cls: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Merge re-send upsert rows from dropped deltas into the current delta.
-        Caller must hold self.grid_lock (reads rendered()/_rows). Delegates to
-        src.server.pending; see that module for the full contract."""
-        return pending_state.merge_pending_upsert(
-            self._pending_upsert, rows, cls, self.grid.rendered(), self.grid._rows)
-
-    def _merge_pending_free(self, freed: np.ndarray) -> np.ndarray:
-        """Merge this frame's freed rows with any pending frees from dropped
-        frames. Caller must hold self.grid_lock. Delegates to src.server.pending."""
-        return pending_state.merge_pending_free(
-            self._pending_free, freed, ~self.grid.rendered(), self.grid.n_theta)
+        instead of an incremental delta: either the periodic cadence is due, or
+        enough consecutive frames have been dropped that a giant cumulative delta
+        would cost more wire bytes than the snapshot it replaces."""
+        if self.grid.frame - self._last_snapshot_frame >= snap_iv:
+            return True
+        return self._consecutive_drops >= self.CATCHUP_DROP_THRESHOLD
 
 
 def _load_pose_mats(seq_dir: str | Path) -> np.ndarray | None:
@@ -599,15 +537,19 @@ def load_history(ckpt_dir: str | Path) -> list[dict]:
 
 
 async def _fan_out(connections: set, item):
-    """Send one queued broadcast item (('B', bytes) | ('T', dict)) to every live ws."""
+    """Send one queued broadcast item (('B', bytes) | ('T', dict)) to every live ws.
+
+    Sends are collected then awaited via asyncio.gather so slow clients do not
+    serialize / pace the whole fan-out (each ws send is independent; websocket
+    adapter serializes per-connection sends internally)."""
     is_bin = item[0] == "B"
     text = None if is_bin else json.dumps(item[1])
     raw = item[1] if is_bin else None
+    live = [ws for ws in connections if ws.application_state.name != "DISCONNECTED"]
+    if not live:
+        return
     dead = []
-    for ws in list(connections):
-        if ws.application_state.name == "DISCONNECTED":
-            dead.append(ws)
-            continue
+    async def _send(ws):
         try:
             if is_bin:
                 await ws.send_bytes(raw)
@@ -615,6 +557,7 @@ async def _fan_out(connections: set, item):
                 await ws.send_text(text)
         except Exception:
             dead.append(ws)
+    await asyncio.gather(*(_send(ws) for ws in live))
     for ws in dead:
         connections.discard(ws)
 
@@ -780,8 +723,13 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                 if await _handle_control_message(pipeline, ws, data):
                     continue
                 if data.get("type") == "request_snapshot":
+                    # On-demand full snapshot: compute WITHOUT commit. This must
+                    # not mutate server sent-state (the pipeline's next delta is
+                    # still derived from its last *committed* frame), otherwise a
+                    # client-initiated snapshot would skip those cells for the
+                    # rest of the stream.
                     with pipeline.grid_lock:
-                        snap = pipeline.grid.snapshot()
+                        snap = pipeline.grid.compute_snapshot()
                     for b in ws_protocol.iter_snapshot_frames(
                             snap["frame"], pipeline.epoch, snap["rows"], snap["cls"],
                             yaw_cd=pipeline._yaw_cd(pipeline.replayer.i)):

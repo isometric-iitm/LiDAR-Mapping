@@ -14,12 +14,7 @@ grid:
   z_min: -5.0         # elevation clamp (m) relative to sensor plane
   z_max: 10.0
   n_classes: 4        # canonical classes displayed in the dashboard
-
-decay:
-  enabled: false      # AP0 precise sensor mode: no temporal decay, grid shows live scan only (if true, uses tau_free)
-  tau_free: 1.5       # seconds for occupancy decay when enabled (occupancy -> exp(-dt/tau)); ignored when enabled=false
-  frame_hz: 10.0
-  occupancy_gain: 1.0 # per-frame occupancy for hit cells when precise (1.0 = fully occupied this frame)
+  occupancy_gain: 1.0 # per-frame occupancy for hit cells (1.0 = fully occupied this frame)
   occ_threshold: 0.2  # rendered/occupied threshold
 
 traversability:

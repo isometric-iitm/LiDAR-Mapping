@@ -42,7 +42,7 @@ def grid_meta_message(grid) -> dict:
 #   <Q frame | <Q epoch | <i n_a | <i n_b | <i seq | <i total | <i yaw_cd
 # yaw_cd = ego forward yaw in centi-degrees (heading-up rendering), 0 if unknown.
 # Body (all little-endian raw arrays, no JSON number tax):
-#   snapshot: n_a rows x {i,j,z_mean,z_max,occ,dyn as f32} then n_a bytes cls u8.
+#   snapshot: n_a rows x {i,j,z_mean,z_max,occ,trav as f32} then n_a bytes cls u8.
 #   Each row record is padded to 28 bytes (24 f32 + 1 cls + 3 pad) so any
 #   following section (delta freed rows) stays 4-byte aligned for typed-array
 #   views on the client.
@@ -50,15 +50,15 @@ def grid_meta_message(grid) -> dict:
 #   cloud:    n_a points x {x,y,z as f32} then n_a bytes cls u8
 # ---------------------------------------------------------------------------
 _MAGIC = 0x50433244
-_VERSION = 2
+_VERSION = 3
 K_SNAPSHOT = 1
 K_DELTA = 2
 K_CLOUD = 3
 _HEAD = struct.Struct("<IHHQQiiiii")
 _HEAD_LEN = _HEAD.size          # 44
-_ROW_F32 = 7 * 4                # i,j,z_mean,z_max,occ,dyn,trav = 28 bytes
-_ROW_PAD = 3                    # pad cls tail out to 4-byte alignment (28+1+3=32)
-_ROW_TOTAL = _ROW_F32 + 1 + _ROW_PAD  # 32 bytes per grid row record
+_ROW_F32 = 6 * 4                # i,j,z_mean,z_max,occ,trav = 24 bytes
+_ROW_PAD = 3                    # pad cls tail out to 4-byte alignment (24+1+3=28)
+_ROW_TOTAL = _ROW_F32 + 1 + _ROW_PAD  # 28 bytes per grid row record
 _PAD3 = b"\x00" * _ROW_PAD
 CHUNK_CELLS = 8000
 
@@ -151,13 +151,13 @@ def decompress_if_needed(data: bytes) -> bytes:
 
 # --- JSON variants (HTTP endpoints / legacy) ---
 def snapshot_message(grid) -> dict:
-    snap = grid.snapshot()
+    snap = grid.compute_snapshot()
     cells = np.concatenate([snap["rows"], snap["cls"].reshape(-1, 1).astype(np.float32)], axis=1).tolist()
     return {"type": "snapshot", "frame": snap["frame"], "cells": cells}
 
 
 def delta_message(grid) -> dict:
-    d = grid.delta()
+    d = grid.compute_delta()
     return {"type": "delta", "frame": d["frame"], "updated": d["rows"].tolist(), "freed": d["freed"].tolist()}
 
 

@@ -4,8 +4,64 @@ from typing import Protocol
 import numpy as np
 import torch
 
+try:
+    from numba import njit
 
-# ---- GPU (torch) projection: all trig + scatter stay on-device ----
+    _NUMBA_OK = True
+except Exception:  # pragma: no cover - numba optional
+    njit = None
+    _NUMBA_OK = False
+
+
+def _compute_projection_numpy(points, h, w, fov_top_deg, fov_bottom_deg):
+    x, y, z = points[:, 0], points[:, 1], points[:, 2]
+    r = np.sqrt(x ** 2 + y ** 2 + z ** 2)
+    r = np.clip(r, 1e-6, None)
+
+    fov_top = np.deg2rad(fov_top_deg)
+    fov_bottom = np.deg2rad(fov_bottom_deg)
+    fov = fov_top - fov_bottom
+
+    row = (1.0 - (np.arcsin(z / r) - fov_bottom) / fov) * (h - 1)
+    col = 0.5 * (np.arctan2(y, x) / np.pi + 1.0) * w
+
+    row = np.clip(np.floor(row).astype(np.int32), 0, h - 1)
+    col = np.clip(np.floor(col).astype(np.int32), 0, w - 1)
+
+    proj = np.stack([row, col], axis=-1).astype(np.int32)
+    return proj, r
+
+
+def _jit_proj(points, h, w, fov_top_deg, fov_bottom_deg):
+    """numba-jitted CPU projection (row, col) + range. Optional accelerator:
+    any import/compile failure falls back to the numpy path below."""
+    n = points.shape[0]
+    proj = np.empty((n, 2), dtype=np.int32)
+    r_out = np.empty(n, dtype=np.float64)
+    fov_top = math.radians(fov_top_deg)
+    fov_bottom = math.radians(fov_bottom_deg)
+    fov = fov_top - fov_bottom
+    for k in range(n):
+        x, y, z = points[k, 0], points[k, 1], points[k, 2]
+        r = math.sqrt(x * x + y * y + z * z)
+        r = r if r > 1e-6 else 1e-6
+        r_out[k] = r
+        row = (1.0 - (math.asin(z / r) - fov_bottom) / fov) * (h - 1)
+        col = 0.5 * (math.atan2(y, x) / math.pi + 1.0) * w
+        ri = max(0, min(h - 1, int(row)))
+        cj = max(0, min(w - 1, int(col)))
+        proj[k, 0] = ri
+        proj[k, 1] = cj
+    return proj, r_out
+
+
+if _NUMBA_OK:
+    try:
+        _jit_proj = njit(cache=True, nogil=True)(_jit_proj)
+    except Exception:  # pragma: no cover - compile hiccup
+        _jit_proj = None
+
+
 def project_points_gpu(
     points: torch.Tensor,
     h: int = 64,
@@ -92,22 +148,15 @@ def compute_projection(
     fov_top_deg: float = 2.0,
     fov_bottom_deg: float = -24.8,
 ) -> tuple[np.ndarray, np.ndarray]:
-    x, y, z = points[:, 0], points[:, 1], points[:, 2]
-    r = np.sqrt(x ** 2 + y ** 2 + z ** 2)
-    r = np.clip(r, 1e-6, None)
+    """CPU row/col projection of (N,3+) points.
 
-    fov_top = np.deg2rad(fov_top_deg)
-    fov_bottom = np.deg2rad(fov_bottom_deg)
-    fov = fov_top - fov_bottom
-
-    row = (1.0 - (np.arcsin(z / r) - fov_bottom) / fov) * (h - 1)
-    col = 0.5 * (np.arctan2(y, x) / np.pi + 1.0) * w
-
-    row = np.clip(np.floor(row).astype(np.int32), 0, h - 1)
-    col = np.clip(np.floor(col).astype(np.int32), 0, w - 1)
-
-    proj = np.stack([row, col], axis=-1).astype(np.int32)
-    return proj, r
+    Uses the numba-jitted fused trig->row/col pass when available (fast CPU
+    path for the segmenter's live back-projection); falls back to the pure
+    numpy implementation otherwise. Both produce identical row/col/range."""
+    if _jit_proj is not None:
+        return _jit_proj(np.ascontiguousarray(points, dtype=np.float32),
+                         int(h), int(w), float(fov_top_deg), float(fov_bottom_deg))
+    return _compute_projection_numpy(points, h, w, fov_top_deg, fov_bottom_deg)
 
 
 def build_range_image(

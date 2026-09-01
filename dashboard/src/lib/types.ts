@@ -1,5 +1,5 @@
-/** Cell tuple: [i, j, zMean, zMax, cls, occ, dyn, trav] */
-export type Cell = [number, number, number, number, number, number, number, number];
+/** Cell tuple: [i, j, zMean, zMax, cls, occ, trav] */
+export type Cell = [number, number, number, number, number, number, number];
 
 export type GridMeta = {
   type: "grid_meta";

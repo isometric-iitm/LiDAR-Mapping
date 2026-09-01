@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -33,6 +34,8 @@ from src.data.webdataset_loader import create_val_loader
 from src.data.label_mapping import bin_5_to_4, remap_labels, load_class_mapping
 from src.models.unet import RangeImageUNet
 from src.models.predict import Segmenter
+
+load_dotenv(repo_root() / ".env", override=False)
 
 
 DISTANCE_BANDS = [(0, 5), (5, 10), (10, 20), (20, 40), (40, 80)]

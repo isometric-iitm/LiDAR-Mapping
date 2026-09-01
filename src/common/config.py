@@ -33,6 +33,8 @@ class GridParams:
     z_min: float = -5.0
     z_max: float = 10.0
     n_classes: int = 4
+    occupancy_gain: float = 1.0
+    occ_threshold: float = 0.2
 
     @classmethod
     def from_dict(cls, g: dict) -> "GridParams":
@@ -46,26 +48,8 @@ class GridParams:
             z_min=g["z_min"],
             z_max=g["z_max"],
             n_classes=int(g["n_classes"]),
-        )
-
-
-@dataclass(frozen=True)
-class DecayParams:
-    """Occupancy cadence/config (config/grid.yaml -> decay:)."""
-    enabled: bool = False
-    tau_free: float = 1.5
-    frame_hz: float = 10.0
-    occupancy_gain: float = 1.0
-    occ_threshold: float = 0.2
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "DecayParams":
-        return cls(
-            enabled=bool(d.get("enabled", False)),
-            tau_free=d.get("tau_free", 1.5),
-            frame_hz=d.get("frame_hz", 10.0),
-            occupancy_gain=d.get("occupancy_gain", 1.0),
-            occ_threshold=d.get("occ_threshold", 0.2),
+            occupancy_gain=g.get("occupancy_gain", 1.0),
+            occ_threshold=g.get("occ_threshold", 0.2),
         )
 
 
@@ -105,9 +89,8 @@ class MemoryParams:
 
 @dataclass(frozen=True)
 class GridConfig:
-    """Typed view of config/grid.yaml (grid/decay/traversability/memory sections)."""
+    """Typed view of config/grid.yaml (grid/traversability/memory sections)."""
     grid: GridParams = field(default_factory=GridParams)
-    decay: DecayParams = field(default_factory=DecayParams)
     traversability: TraversabilityParams = field(default_factory=TraversabilityParams)
     memory: MemoryParams = field(default_factory=MemoryParams)
 
@@ -115,7 +98,6 @@ class GridConfig:
     def from_dict(cls, cfg: dict) -> "GridConfig":
         return cls(
             grid=GridParams.from_dict(cfg["grid"]),
-            decay=DecayParams.from_dict(cfg.get("decay", {})),
             traversability=TraversabilityParams.from_dict(cfg.get("traversability", {})),
             memory=MemoryParams.from_dict(cfg.get("memory", {})),
         )

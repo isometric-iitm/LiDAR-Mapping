@@ -1,9 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { inflateRaw } from "pako";
 import type { AckMsg, Cell, DeltaMsg, GridMeta, SnapshotMsg, Stats } from "./types";
 import { keyOf } from "./gridGeometry";
+import { createFrameDecoder, type FrameDecoder } from "./frameDecoder";
 
 export type CellMap = Map<number, Cell>;
 export type ConnState = "connecting" | "open" | "closed";
@@ -42,34 +42,18 @@ export type UseMapStream = {
 
 const WS_URL = process.env.NEXT_PUBLIC_PC2D_WS ?? "ws://localhost:8000/ws/map";
 
-const MAGIC = 0x50433244;
-const K_SNAPSHOT = 1;
-const K_DELTA = 2;
-const K_CLOUD = 3;
-
-/** Decompress a binary frame if it has the 'Z' prefix (server raw-DEFLATE +
- *  5-byte header: b'Z' + uint32 original length -- see ws_protocol.py).
- *  Synchronous pako inflate avoids an await + stream teardown per WebSocket
- *  message, which previously throttled high-fps binary chunk streams. */
-function decompressFrame(buf: ArrayBuffer): ArrayBuffer {
-  const u8 = new Uint8Array(buf);
-  if (u8.length <= 5 || u8[0] !== 0x5a) return buf; // not compressed
-  try {
-    const out = inflateRaw(u8.subarray(5));
-    return out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength);
-  } catch (e) {
-    console.warn("[ws] decompress failed, using raw:", e);
-    return buf;
+/** Convert accumulated flat freed keys back to [i,j] pairs for the patch. */
+function pairFrom(flatKeys: number[], nTheta: number): [number, number][] {
+  const out: [number, number][] = new Array(flatKeys.length);
+  for (let k = 0; k < flatKeys.length; k++) {
+    const key = flatKeys[k];
+    out[k] = [Math.floor(key / nTheta), key % nTheta];
   }
+  return out;
 }
 
-/** Decode a server binary frame (see src/server/ws_protocol.py, 44-byte
- *  header `struct "<IHHQQiiiii"`) into the legacy message shapes so the
- *  existing chunk/epoch/freeze logic is shared. */
-
 /** ServerMsg plus the fields the binary channel carries that the legacy JSON
- *  shapes didn't (chunk bookkeeping on cloud frames, typed-array payloads,
- *  per-frame ego yaw in radians). */
+ *  shapes didn't (chunk bookkeeping on cloud frames, per-frame ego yaw). */
 type MapMsg =
   | GridMeta
   | Stats
@@ -88,47 +72,6 @@ type MapMsg =
       epoch?: number;
       yaw?: number;
     });
-
-function parseBinary(buf: ArrayBuffer): MapMsg | null {
-  const dv = new DataView(buf);
-  if (dv.byteLength < 44 || dv.getUint32(0, true) !== MAGIC) return null;
-  const code = dv.getUint16(4, true);
-  const frame = Number(dv.getBigInt64(8, true));
-  const epoch = Number(dv.getBigInt64(16, true));
-  const n = dv.getInt32(24, true);
-  const nFreed = dv.getInt32(28, true);
-  const seq = dv.getInt32(32, true);
-  const total = dv.getInt32(36, true);
-  const yaw = ((dv.getInt32(40, true) / 100) * Math.PI) / 180;
-  const base = { frame, epoch, seq, total, yaw };
-
-  if (code === K_CLOUD) {
-    return {
-      type: "cloud",
-      ...base,
-      n,
-      xyz: new Float32Array(buf, 44, n * 3),
-      cls: new Uint8Array(buf, 44 + n * 12, n),
-    };
-  }
-  if (code !== K_SNAPSHOT && code !== K_DELTA) return null;
-
-  // row record is 32 bytes: [i,j,z_mean,z_max,occ,dyn,trav] f32 (28) + cls u8 + 3 pad
-  const f = new Float32Array(buf, 44, n * 7);
-  const cls = new Uint8Array(buf, 44 + n * 28, n);
-  const cells = new Array<Cell>(n);
-  for (let k = 0; k < n; k++) {
-    const o = k * 7;
-    cells[k] = [f[o], f[o + 1], f[o + 2], f[o + 3], cls[k], f[o + 4], f[o + 5], f[o + 6]];
-  }
-  if (code === K_SNAPSHOT) {
-    return { type: "snapshot", ...base, cells };
-  }
-  const freedNr = new Float32Array(buf, 44 + n * 32, nFreed * 2);
-  const freed = new Array<[number, number]>(nFreed);
-  for (let k = 0; k < nFreed; k++) freed[k] = [freedNr[2 * k], freedNr[2 * k + 1]];
-  return { type: "delta", ...base, cells, freed };
-}
 
 export function useMapStream(): UseMapStream {
   const [conn, setConn] = useState<ConnState>("connecting");
@@ -163,6 +106,12 @@ export function useMapStream(): UseMapStream {
   const cloudBuf = useRef<{ xyz: Float32Array; cls: Uint8Array; off: number } | null>(null);
 
   const deltaAcc = useRef<Cell[]>([]);
+  const deltaFreed = useRef<number[]>([]);
+  const deltaFrame = useRef(-1);
+  // Binary frame decode (pako inflate + 28-byte row parse) runs in a worker so
+  // it never contends with React/R3F for the main thread.
+  const decoderRef = useRef<FrameDecoder | null>(null);
+  if (decoderRef.current === null) decoderRef.current = createFrameDecoder();
 
   // perf logging accumulators
   const perfRef = useRef({ n: 0, totalParseMs: 0, totalHandleMs: 0, totalBytes: 0 });
@@ -214,6 +163,8 @@ export function useMapStream(): UseMapStream {
           setCells(new Map());
           setLiveCount(0);
           deltaAcc.current = [];
+          deltaFreed.current.length = 0;
+          deltaFrame.current = -1;
           setPatch({ kind: "reset", frame: 0 });
           if ("seq_id" in msg && typeof msg.seq_id === "string") setSeqId(msg.seq_id);
           return;
@@ -238,6 +189,8 @@ export function useMapStream(): UseMapStream {
             full.current.clear();
             snapBuf.current.clear();
             deltaAcc.current = [];
+            deltaFreed.current.length = 0;
+            deltaFrame.current = -1;
             setCells(new Map());
             setLiveCount(0);
             setCloud(null);
@@ -250,6 +203,8 @@ export function useMapStream(): UseMapStream {
             full.current.clear();
             snapBuf.current.clear();
             deltaAcc.current = [];
+            deltaFreed.current.length = 0;
+            deltaFrame.current = -1;
             setCells(new Map());
             setLiveCount(0);
             setCloud(null);
@@ -308,31 +263,44 @@ export function useMapStream(): UseMapStream {
 
         if (msg.type === "delta") {
           // Incremental frame. The server sends each frame as a chain of chunks
-          // (seq 0..total-1); 'freed' rides on the final chunk. Apply upserts
-          // eagerly (cheap per-chunk) and commit on the final chunk. A fresh
-          // frame always starts at seq 0 — if we see one, any partial
-          // accumulation from a prior frame is stale, so reset it to avoid
-          // leaking upserts across dropped frames.
+          // (seq 0..total-1); 'freed' rides on the final chunk (but treat frees
+          // as frame-scoped regardless of arrival chunk). We accumulate the
+          // whole frame then apply it ONCE at the last chunk so that:
+          //   1) a re-added cell is not wrongly deleted by its own frame's free
+          //      (free-before-upsert): freed indices are collected, then all
+          //      upserts win on the final apply.
+          //   2) a fresh frame always discards any half-accumulated prior frame
+          //      (reset on frame change, not just seq==0) so upserts never leak
+          //      across a dropped frame boundary.
           const t0 = performance.now();
-          if (msg.seq === 0) {
+          if (msg.seq === 0 || msg.frame !== deltaFrame.current) {
             deltaAcc.current = [];
+            deltaFreed.current.length = 0;
           }
+          deltaFrame.current = msg.frame;
           for (const c of msg.cells) {
-            full.current.set(keyOf(c[0], c[1], nThetaRef.current), c);
             deltaAcc.current.push(c);
           }
           for (const [i, j] of msg.freed) {
-            full.current.delete(keyOf(i, j, nThetaRef.current));
+            deltaFreed.current.push(keyOf(i, j, nThetaRef.current));
           }
           if (msg.seq === msg.total - 1) {
             const mapCopy0 = performance.now();
+            // Free first, then upsert so a cell both freed and re-added in the
+            // same frame ends up present (the upsert wins).
+            for (const k of deltaFreed.current) {
+              full.current.delete(k);
+            }
+            for (const c of deltaAcc.current) {
+              full.current.set(keyOf(c[0], c[1], nThetaRef.current), c);
+            }
             // Pass the live map reference (not a full copy): `cells` is only
             // read on snapshot frames and for the empty/hint check, so an
             // O(n) copy each delta frame is wasted work. Snapshots resync it.
             setCells(full.current);
             setLiveCount(full.current.size);
             setLastFrame(msg.frame);
-            setPatch({ kind: "delta", frame: msg.frame, upserts: deltaAcc.current, frees: msg.freed });
+            setPatch({ kind: "delta", frame: msg.frame, upserts: deltaAcc.current, frees: pairFrom(deltaFreed.current, nThetaRef.current) });
             const mapCopyMs = performance.now() - mapCopy0;
             const totalMs = performance.now() - t0;
             console.log(
@@ -342,6 +310,7 @@ export function useMapStream(): UseMapStream {
               `map_copy=${mapCopyMs.toFixed(1)}ms handle=${totalMs.toFixed(1)}ms`
             );
             deltaAcc.current = [];
+            deltaFreed.current.length = 0;
             if (full.current.size > 0) setBuffering(false);
           }
           return;
@@ -363,6 +332,8 @@ export function useMapStream(): UseMapStream {
             setLiveCount(full.current.size);
             setLastFrame(msg.frame);
             deltaAcc.current = [];
+            deltaFreed.current.length = 0;
+            deltaFrame.current = msg.frame;
             setPatch({ kind: "snap", frame: msg.frame, upserts: [...snapBuf.current.values()] });
             const t2 = performance.now();
             console.debug(
@@ -383,32 +354,37 @@ ws.onmessage = (ev) => {
             } catch {
               /* ignore malformed */
             }
-          } else {
-            const t0 = performance.now();
-            const buf = decompressFrame(ev.data as ArrayBuffer);
-            const parseMs = performance.now() - t0; // decompress + still parse below
-            const msg = parseBinary(buf);
-          const t1 = performance.now();
-          if (msg) handleMsg(msg);
-          const handleMs = performance.now() - t1;
-          // perf logging: aggregate every 30 frames
-          const p = perfRef.current;
-          p.n += 1;
-          p.totalParseMs += parseMs;
-          p.totalHandleMs += handleMs;
-          p.totalBytes += (ev.data as ArrayBuffer).byteLength;
-          if (p.n >= 30) {
-            console.debug(
-              `[ws:perf] frames=${p.n} ` +
-              `avg_parse=${(p.totalParseMs / p.n).toFixed(2)}ms ` +
-              `avg_handle=${(p.totalHandleMs / p.n).toFixed(2)}ms ` +
-              `avg_bytes=${(p.totalBytes / p.n / 1024).toFixed(1)}KB ` +
-              `total_bytes=${(p.totalBytes / 1024).toFixed(0)}KB`
-            );
-            perfRef.current = { n: 0, totalParseMs: 0, totalHandleMs: 0, totalBytes: 0 };
+            return;
           }
-        }
-      };
+          const dec = decoderRef.current;
+          if (!dec) return;
+          const t0 = performance.now();
+          dec(ev.data as ArrayBuffer)
+            .then((msg) => {
+              if (cancelled || !msg) return;
+              const t1 = performance.now();
+              handleMsg(msg);
+              const handleMs = performance.now() - t1;
+              const parseMs = performance.now() - t0;
+              // perf logging: aggregate every 30 frames
+              const p = perfRef.current;
+              p.n += 1;
+              p.totalParseMs += parseMs;
+              p.totalHandleMs += handleMs;
+              p.totalBytes += (ev.data as ArrayBuffer).byteLength;
+              if (p.n >= 30) {
+                console.debug(
+                  `[ws:perf] frames=${p.n} ` +
+                  `avg_parse=${(p.totalParseMs / p.n).toFixed(2)}ms ` +
+                  `avg_handle=${(p.totalHandleMs / p.n).toFixed(2)}ms ` +
+                  `avg_bytes=${(p.totalBytes / p.n / 1024).toFixed(1)}KB ` +
+                  `total_bytes=${(p.totalBytes / 1024).toFixed(0)}KB`
+                );
+                perfRef.current = { n: 0, totalParseMs: 0, totalHandleMs: 0, totalBytes: 0 };
+              }
+            })
+            .catch(() => {});
+        };
 
       ws.onclose = () => {
         if (cancelled) return;

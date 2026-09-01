@@ -25,11 +25,13 @@ import { computeRingEdges } from "@/lib/gridGeometry";
 
 type CamMode = "persp" | "ortho" | "top";
 
-function DemandInvalidator({ patch, camMode }: { patch: unknown; camMode: string }) {
+function DemandInvalidator({ patch, camMode, travMode, opacity }: { patch: unknown; camMode: string; travMode: boolean; opacity: number }) {
   const invalidate = useThree((s) => s.invalidate);
-  useEffect(() => {
+  // layout-effect so a new patch/trav-mode/opacity frame is invalidated before
+  // the browser paints (a passive effect could leave a stale frame on screen).
+  useLayoutEffect(() => {
     invalidate();
-  }, [patch, camMode, invalidate]);
+  }, [patch, camMode, travMode, opacity, invalidate]);
   return null;
 }
 
@@ -100,7 +102,6 @@ function hoverInfo(cell: CellInfo, gridEdges: number[], nTheta: number): {
   zMax: number;
   zMean: number;
   occ: number;
-  dyn: number;
   trav: number;
   r: number;
   deg: number;
@@ -119,7 +120,6 @@ function hoverInfo(cell: CellInfo, gridEdges: number[], nTheta: number): {
     zMax: cell.zMax,
     zMean: cell.zMean,
     occ: cell.occ,
-    dyn: cell.dyn,
     trav: cell.trav,
     r,
     deg,
@@ -299,7 +299,7 @@ export default function Home() {
               maxZoom={12}
             />
             <PerfOverlay onStats={onClientPerf} />
-            <DemandInvalidator patch={patch} camMode={camMode} />
+            <DemandInvalidator patch={patch} camMode={camMode} travMode={viewMode === "trav"} opacity={gridOpacity} />
             {animTarget && (
               <CameraAnimator
                 target={animTarget}
