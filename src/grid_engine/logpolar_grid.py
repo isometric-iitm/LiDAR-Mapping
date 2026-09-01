@@ -31,8 +31,10 @@ def load_grid_config(path: str | Path | None = None) -> dict:
 class LogPolarGrid:
     """Variable-resolution 2.5D grid engine (PROJECT_SPEC §9).
 
-    Cells are (ring, sector) pairs with geometrically growing ring width:
-      ring i covers [r_min·α^i, r_min·α^(i+1)).
+    Two-phase ring geometry (PS: "5cm within 10m, 50cm up to 100m"):
+      Phase 1 (r_min → r_transition): uniform dr_0 rings (alpha = 1.0).
+      Phase 2 (r_transition → r_max): geometric growth dr_0 · α^i.
+    Cells are (ring, sector) pairs; sectors are uniform across all rings.
     """
 
     def __init__(self, cfg: dict | None = None):
@@ -42,6 +44,7 @@ class LogPolarGrid:
         self.r_min = g["r_min"]
         self.r_max = g["r_max"]
         self.dr_0 = g["dr_0"]
+        self.r_transition = g.get("r_transition", self.r_max)
         self.alpha = g["alpha"]
         self.n_theta = int(g["n_theta"])
         self.z_min = g["z_min"]
@@ -59,17 +62,37 @@ class LogPolarGrid:
         self.uniform_side = m["uniform_cell_guess"]
         self.uniform_dx = m["uniform_cell_size"]
 
-        # derived ring geometry
-        cumulative = 0.0
-        i = 0
-        while cumulative < (self.r_max - self.r_min):
-            cumulative += self.dr_0 * (self.alpha ** i)
-            i += 1
-        self.n_rings = i
+        # derived ring geometry — two-phase
+        # Phase 1: uniform dr_0 rings from r_min to r_transition
+        # Phase 2: geometric dr_0 * alpha^i from r_transition to r_max
+        self.phase1_rings = round((self.r_transition - self.r_min) / self.dr_0)
+        phase2_span = self.r_max - (self.r_min + self.phase1_rings * self.dr_0)
+        if phase2_span > 0 and self.alpha > 1.0:
+            # closed-form geometric series: sum(dr_0*alpha^i, i=0..n-1) = dr_0*(alpha^n - 1)/(alpha - 1)
+            # solve for the integer ring count n that reaches phase2_span
+            n2_exact = math.log(1.0 + (phase2_span * (self.alpha - 1.0) / self.dr_0)) / math.log(self.alpha)
+            # round (not ceil) so the final ring stays close to the geometric width (~50 cm),
+            # then the last ring is clamped to the exact remainder below
+            self.phase2_rings = max(1, int(round(n2_exact)))
+        else:
+            self.phase2_rings = 0
+
+        self.n_rings = self.phase1_rings + self.phase2_rings
         self.n_cells = self.n_rings * self.n_theta
-        self.ring_widths = self.dr_0 * (self.alpha ** np.arange(self.n_rings))
+
+        widths_p2 = None
+        if self.phase2_rings > 0:
+            widths_p2 = self.dr_0 * (self.alpha ** np.arange(self.phase2_rings))
+            # exact cover: clamp the final ring to land precisely on r_max
+            # (never near-zero; it stays close to the geometric width)
+            covered = np.sum(widths_p2[:-1])
+            widths_p2[-1] = phase2_span - covered
+            self.ring_widths = np.concatenate([np.full(self.phase1_rings, self.dr_0), widths_p2])
+        else:
+            self.ring_widths = np.full(self.phase1_rings, self.dr_0)
         self._ring_edges = np.concatenate([[self.r_min], self.r_min + np.cumsum(self.ring_widths)])
-        # ring i covers [_ring_edges[i], _ring_edges[i+1]); width dr_0 * alpha^i (grows 5cm -> ~50cm at 100 m)
+        # Phase 1: ring i width = dr_0 (uniform 5 cm within r_transition)
+        # Phase 2: ring i width = dr_0 * alpha^(i - phase1_rings) (grows to ~50 cm at r_max)
 
         # state (struct-of-arrays) — AP0 precise: no temporal smoothing
         self.z_mean = np.zeros(self.n_cells, dtype=np.float32)

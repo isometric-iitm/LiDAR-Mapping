@@ -78,12 +78,12 @@ Real-time semantic segmentation of LiDAR point clouds projected onto a **variabl
 
 </details>
 
-### Memory: ~43× compression
+### Memory: ~34× compression
 
 | Grid type | Cell size | Cell count | Memory |
 |-----------|-----------|------------|--------|
 | Uniform 5 cm | 0.05 m × 0.05 m | ~16 million | ~784 MB |
-| **Log-polar (ours)** | 5 cm → 50 cm | ~369K | **~17 MB** |
+| **Log-polar (ours)** | 5 cm → 50 cm | ~469K | **~22 MB** |
 
 <!-- RESULTS_END -->
 
@@ -211,7 +211,7 @@ pc2d/
 │   │   ├── lovasz.py         # CombinedLoss (CE + Lovasz-Softmax)
 │   │   └── predict.py        # Segmenter (end-to-end: project → forward → KNN)
 │   ├── grid_engine/
-│   │   ├── logpolar_grid.py  # LogPolarGrid (~369K cells, ~17 MB, decay, delta, JIT-accelerated reduce)
+│   │   ├── logpolar_grid.py  # LogPolarGrid (~469K cells, ~22 MB, two-phase, decay, delta, JIT-accelerated reduce)
 │   │   └── jit_reduce.py     # numba fused per-cell scatter-reduce (min/max/sum/count/class)
 │   └── server/
 │       ├── app.py            # FastAPI + two-stage Pipeline (SEG thread + GRID thread) + WS endpoints
@@ -235,30 +235,33 @@ pc2d/
 
 ## Variable-Resolution Grid
 
-The core innovation: ring width grows geometrically from **5 cm (near)** to **~50 cm (far at 100 m)**, achieving dramatic memory savings while preserving fine detail where it matters most.
+The core innovation: a **two-phase** ring geometry. Phase 1 keeps uniform **5 cm** rings from the sensor out to 10 m — exactly matching the PS requirement of "5cm cells within 10m radius". Phase 2 then grows each ring's width geometrically to **~50 cm** out to 100 m, achieving dramatic memory savings while preserving fine detail where it matters most — and the seam at 10 m is invisible (Phase 2's first ring is also 5 cm).
 
 ### Ring geometry
 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
-| `dr_0` | 0.05 m | First ring width (5 cm) |
-| `alpha` | 1.0045 | Geometric growth factor per ring |
+| `dr_0` | 0.05 m | Ring base width (5 cm) |
+| `r_transition` | 10.0 m | Phase 1 → Phase 2 boundary (uniform → geometric) |
+| `alpha` | 1.005 | Phase 2 geometric growth factor per ring |
 | `r_min` | 0.5 m | Inner dead zone |
 | `r_max` | 100 m | Outer cutoff |
 | `n_theta` | 720 | Angular sectors (0.5° each) |
-| Resulting rings | ~512 | dr_0 * α^i cumulative reaches r_max at i≈512 |
-| Resulting cells | ~369K | rings × sectors |
+| Phase 1 rings | 190 | Uniform 5 cm rings (0.5 → 10 m) |
+| Phase 2 rings | 462 | Geometric 5 cm → ~50 cm (10 → 100 m) |
+| Resulting rings | ~652 | Phase 1 + Phase 2 |
+| Resulting cells | ~469K | rings × sectors |
 
 ### Temporal dynamics
 
 | Feature | Mechanism | Parameter |
 |---------|-----------|-----------|
-| Occupancy decay | `occ *= exp(-dt / tau_free)` | `tau_free = 1.5 s` |
-| Occupancy gain | `occ += (1 - occ) * gain` on hit | `gain = 0.3` |
+| Occupancy decay | `occ *= exp(-dt / tau_free)` (decay mode) | `tau_free = 1.5 s` |
+| Occupancy gain | `occ += (1 - occ) * gain` on hit (decay mode) | `gain = 1.0` (precise mode; decay uses `occupancy_gain = 1.0`) |
 | Rendered threshold | `occ > 0.2` | - |
-| Dynamic detection | free→occupied flip boosts `dyn_score` | `dyn_change_boost = 0.2` |
-| Dynamic threshold | `dyn_score > 0.5` | - |
 | Ground reference | 20th percentile of z in 1.5-15 m | auto-tracked per frame |
+
+> Default is **precise sensor mode** (`decay.enabled = false`): no temporal decay, occupancy is per-frame sensor truth. Setting `decay.enabled = true` enables the exponential decay / EMA semantics above.
 
 ---
 

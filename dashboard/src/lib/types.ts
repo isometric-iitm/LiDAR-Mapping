@@ -5,9 +5,11 @@ export type GridMeta = {
   type: "grid_meta";
   r_min: number;
   r_max: number;
+  r_transition: number;
   alpha: number;
   dr_0: number;
   n_rings: number;
+  phase1_rings: number;
   n_theta: number;
   n_classes: number;
   class_colors: Record<string, string>;

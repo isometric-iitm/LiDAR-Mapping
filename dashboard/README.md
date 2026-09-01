@@ -17,7 +17,7 @@ Real-time 3D semantic map viewer and training curves for the PC2D LiDAR mapping 
 
 ## Features
 
-- **2.5D log-polar grid** - ~369K cells rendered as instanced boxes, incrementally updated via delta patches (only changed cells re-computed)
+- **2.5D log-polar grid** - ~469K cells rendered as instanced boxes, incrementally updated via delta patches (only changed cells re-computed)
 - **Segmented point cloud** - class-colored per-point overlay from the UNet's KNN back-projection
 - **Raw point cloud comparison** - height-gradient colored overlay for side-by-side inspection
 - **Compare mode** - segmented and raw clouds overlaid simultaneously
@@ -28,7 +28,7 @@ Real-time 3D semantic map viewer and training curves for the PC2D LiDAR mapping 
 - **Training curves** - mIoU (4-class, 5-class), validation loss, per-class IoU over training steps
 - **Evaluation** - pixel + point level mIoU, per-class IoU, per-distance-band mIoU, latency, memory
 - **Iconoir icons** - Play/Pause, compass (north-up), and page navigation use the [Iconoir](https://iconoir.com/) icon set
-- **~43× memory compression** visualization in the sidebar
+- **~34× memory compression** visualization in the sidebar
 
 ---
 
@@ -140,7 +140,7 @@ All shared types live in `src/lib/types.ts`:
 | Type | Description |
 |------|-------------|
 | `Cell` | `[i, j, zMean, zMax, cls, occ, dyn]` - single grid cell tuple |
-| `GridMeta` | Grid config: `r_min`, `r_max`, `alpha`, `dr_0`, `n_rings`, `n_theta`, `n_classes`, `class_colors` |
+| `GridMeta` | Grid config: `r_min`, `r_max`, `r_transition`, `alpha`, `dr_0`, `n_rings`, `phase1_rings`, `n_theta`, `n_classes`, `class_colors` |
 | `Stats` | Performance: `frame`, `fps`, latency p50/p95, per-stage ms, memory, compression ratio |
 | `SnapshotMsg` | Full grid: `frame`, `seq`, `total`, `cells[]`, optional `epoch` |
 | `DeltaMsg` | Incremental: `frame`, `seq`, `total`, `cells[]`, `freed[]`, optional `epoch` |

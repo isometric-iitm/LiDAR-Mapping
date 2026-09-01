@@ -32,7 +32,11 @@ class TestRingIndex:
 
     def test_hand_computed_ring0_width(self, grid):
         assert grid.ring_widths[0] == pytest.approx(grid.dr_0, rel=1e-10)
-        assert grid.ring_widths[1] == pytest.approx(grid.dr_0 * grid.alpha, rel=1e-10)
+        # phase 1 is uniform 5 cm; phase-2 ring i has width dr_0 * alpha^i,
+        # so the second phase-2 ring (i=1) = dr_0 * alpha
+        if grid.phase2_rings > 1:
+            i2 = grid.phase1_rings + 1
+            assert grid.ring_widths[i2] == pytest.approx(grid.dr_0 * grid.alpha, rel=1e-10)
 
 
 class TestSectorIndex:
@@ -60,28 +64,33 @@ class TestSectorIndex:
 
 class TestNRingsAndNCells:
     def test_n_rings_at_least_500(self, grid):
-        assert grid.n_rings >= 500
+        assert grid.n_rings >= 600
 
     def test_n_cells_equals_rings_times_theta(self, grid):
         assert grid.n_cells == grid.n_rings * grid.n_theta
 
-    def test_n_cells_around_370k(self, grid):
-        assert 350000 < grid.n_cells < 400000
+    def test_n_cells_around_470k(self, grid):
+        assert 440000 < grid.n_cells < 500000
 
     def test_derived_from_config(self, grid_cfg):
         g = LogPolarGrid(grid_cfg)
-        cumulative = 0.0
-        i = 0
-        while cumulative < (g.r_max - g.r_min):
-            cumulative += g.dr_0 * (g.alpha ** i)
-            i += 1
-        assert g.n_rings == i
+        # two-phase: phase1 uniform + phase2 closed-form geometric
+        import math
+        p1 = round((g.r_transition - g.r_min) / g.dr_0)
+        p2_span = g.r_max - (g.r_min + p1 * g.dr_0)
+        if p2_span > 0 and g.alpha > 1.0:
+            n2_exact = math.log(1.0 + (p2_span * (g.alpha - 1.0) / g.dr_0)) / math.log(g.alpha)
+            p2 = max(1, int(round(n2_exact)))
+        else:
+            p2 = 0
+        assert g.n_rings == p1 + p2
+        assert g.phase2_rings == p2
 
 
 class TestMemoryReport:
-    def test_grid_kb_under_20000(self, grid):
+    def test_grid_kb_under_30000(self, grid):
         mem = grid.memory_report()
-        assert mem["grid_kb"] < 20000
+        assert mem["grid_kb"] < 30000
 
     def test_compression_ratio_over_10(self, grid):
         mem = grid.memory_report()
@@ -93,11 +102,23 @@ class TestMemoryReport:
 
     def test_ring_width_far_reasonable(self, grid):
         mem = grid.memory_report()
-        assert 0.4 < mem["ring_width_far_m"] < 10.0
+        assert 0.4 < mem["ring_width_far_m"] < 1.0
 
     def test_n_cells_matches(self, grid):
         mem = grid.memory_report()
         assert mem["n_cells"] == grid.n_cells
+
+    def test_phase1_rings_are_uniform(self, grid):
+        for i in range(grid.phase1_rings):
+            assert grid.ring_widths[i] == pytest.approx(grid.dr_0, rel=1e-10)
+
+    def test_phase2_first_ring_matches_dr0(self, grid):
+        if grid.phase2_rings > 0:
+            assert grid.ring_widths[grid.phase1_rings] == pytest.approx(grid.dr_0, rel=1e-10)
+
+    def test_phase2_last_ring_near_50cm(self, grid):
+        if grid.phase2_rings > 0:
+            assert 0.48 < grid.ring_widths[-1] < 0.52
 
 
 class TestCellIdsFromXY:

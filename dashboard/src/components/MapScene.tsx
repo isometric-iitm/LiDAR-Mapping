@@ -75,6 +75,11 @@ function InstancedCells({
     p: THREE.Vector3;
     c: THREE.Color;
   } | null>(null);
+  // Last frame number actually rendered. When deltas arrive with a jump > 1 it
+  // means intermediate frames were dropped on the wire; those may have carried
+  // upserts/frees that never reached us, so we cheaply reconcile ghost slots
+  // instead of waiting for the periodic full snapshot to heal them.
+  const lastRenderedFrame = useRef(-1);
 
   useLayoutEffect(() => {
     const mesh = ref.current;
@@ -277,9 +282,24 @@ function InstancedCells({
       dirty = true;
       matDirty = true;
       colDirty = true;
+      lastRenderedFrame.current = patch.frame;
     } else if (patch.kind === "delta") {
       for (const cell of patch.upserts) { if (writeCell(cell)) written++; dirty = true; }
       for (const [i, j] of patch.frees) { if (freeCell(i, j)) { freed_count++; dirty = true; matDirty = true; colDirty = true; } }
+      // Belt-and-suspenders ghost healing: if deltas jumped over dropped frames,
+      // some upserts/frees may have been lost even with server retransmit (e.g.
+      // a socket hiccup). Free any renderer slot whose cell is no longer in the
+      // authoritative map, so stale boxes don't linger until the next snapshot.
+      if (lastRenderedFrame.current >= 0 && patch.frame - lastRenderedFrame.current > 1) {
+        for (const key of [...c.slotOf.keys()]) {
+          if (!cells.has(key)) {
+            if (freeCell(Number(key.split(":")[0]), Number(key.split(":")[1]))) {
+              freed_count++; dirty = true; matDirty = true; colDirty = true;
+            }
+          }
+        }
+      }
+      lastRenderedFrame.current = patch.frame;
     } else {
       // snapshot: reconcile against the authoritative full map, skipping
       // slots/rows whose values are unchanged so steady-state snapshots are ~free.
@@ -290,6 +310,7 @@ function InstancedCells({
         if (!cells.has(`${cell[0]}:${cell[1]}`)) continue;
         if (writeCell(cell)) written++;
       }
+      lastRenderedFrame.current = patch.frame;
     }
     const layoutMs = performance.now() - t0;
     if (written > 0 || freed_count > 0) {

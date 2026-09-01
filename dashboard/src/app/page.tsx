@@ -24,12 +24,12 @@ import { useMapStream } from "@/lib/useMapStream";
 
 type CamMode = "persp" | "ortho" | "top";
 
-function computeGridEdges(meta: { r_min: number; dr_0: number; alpha: number; n_rings: number }): number[] {
-  const { r_min, dr_0, alpha, n_rings } = meta;
+function computeGridEdges(meta: { r_min: number; dr_0: number; alpha: number; n_rings: number; phase1_rings?: number }): number[] {
+  const { r_min, dr_0, alpha, n_rings, phase1_rings = 0 } = meta;
   const edges: number[] = [r_min];
   let cum = 0;
   for (let k = 0; k < n_rings; k++) {
-    cum += dr_0 * alpha ** k;
+    cum += k < phase1_rings ? dr_0 : dr_0 * alpha ** (k - phase1_rings);
     edges.push(r_min + cum);
   }
   return edges;
@@ -187,7 +187,7 @@ export default function Home() {
   }, []);
 
   const maxR = meta?.r_max ?? 100;
-  const gridEdges = useMemo(() => meta ? computeGridEdges(meta) : [], [meta?.r_min, meta?.dr_0, meta?.alpha, meta?.n_rings]);
+  const gridEdges = useMemo(() => meta ? computeGridEdges(meta) : [], [meta?.r_min, meta?.dr_0, meta?.alpha, meta?.n_rings, meta?.phase1_rings]);
   const nTheta = meta?.n_theta ?? 720;
 
   const resetNorth = () => {
