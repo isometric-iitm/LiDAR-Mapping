@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import json
 import math
 import queue
@@ -17,30 +17,26 @@ from src.data.replayer import SemanticKITTIReplayer
 from src.grid_engine.logpolar_grid import LogPolarGrid
 from src.models.predict import Segmenter
 from src.server import ws_protocol
+from src.server.broadcaster import Broadcaster
+from src.server.metrics import FrameMetrics
 
 
 class Pipeline:
     """Two-stage streaming pipeline: SEG thread (GPU segmenter) runs ahead of the
-    GRID thread (CPU grid update + pack/emit), hiding the GPU's device→host sync
+    GRID thread (CPU grid update + pack/emit), hiding the GPU's device->host sync
     behind the previous frame's grid work. A single-slot mailbox preserves strict
     frame ordering with at most 1 frame of look-ahead.     Falls back to a serial
     single-thread path when ``pipeline.stages: single`` is set in config."""
 
-    # When at least this many frames drop consecutively (or the pending
-    # retransmit volume reaches PENDING_THRESHOLD), emit a full snapshot instead
-    # of a large merged delta so the client resyncs cleanly (no transient map
-    # bloat / layout jank). Tuned well above the normal snapshot interval so the
-    # periodic snapshot path is unaffected.
-    CATCHUP_DROP_THRESHOLD = 6
-    CATCHUP_PENDING_THRESHOLD = 40_000
+    # Emit a snapshot after this many consecutive drops so the client resyncs.
+    CATCHUP_DROP_THRESHOLD = 2
 
     def __init__(self, cfg: dict):
         from src.common.config import resolve_path
         self.cfg = cfg
         src = cfg["source"]
         mdl = cfg["model"]
-        # seq_dir and checkpoint may be relative to the repo root â€” resolve them
-        # so we don't depend on the process CWD.
+        # seq_dir and checkpoint may be relative to the repo root; resolve so we don't depend on CWD.
         seq_dir = resolve_path(src["seq_dir"])
         self.seq_base_dir = seq_dir.parent
         self.seq_id = seq_dir.name
@@ -57,32 +53,13 @@ class Pipeline:
         )
         self.grid = LogPolarGrid()
         self.grid_lock = threading.Lock()
-        # Larger queue; precise mode drops intermediate snapshots (coalesce) so
-        # 10Hz snapshots don't overflow when dashboard is briefly slow. Sized well
-        # above the typical per-frame chunk count (~7) so short disk/I/O bursts
-        # are absorbed instead of dropping frames; any frames that DO drop are now
-        # re-transmitted losslessly via _pending_upsert/_pending_free.
-        self.messages: queue.Queue = queue.Queue(maxsize=128)
+        # Small bounded queue; pure deltas make drops non-lossy, so it only
+        # absorbs short bursts. Backpressure trips catchup snapshot quickly.
+        self.broadcaster = Broadcaster(
+            maxsize=32, wire_compress=bool(self.cfg["server"].get("wire_compress", False))
+        )
         self.pause_event = threading.Event()
-        self._frames_emitted = 0
-        self._frames_dropped = 0
-        # Flat cell indices (i*n_theta+j) whose `freed` was computed by delta()
-        # but whose outgoing frame was dropped by the queue (overflow). Merged
-        # into the next successfully-emitted delta so the client never loses a
-        # free (the source of ghost cells). Cleared on snapshot / seek.
-        self._pending_free: set = set()
-        # Flat cell indices (i*n_theta+j) whose `added`/`changed` rows were
-        # computed by delta() but whose outgoing frame was dropped by the queue.
-        # Unlike `_pending_free` (only frees), there is no server-side guard for
-        # lost upserts, so a dropped delta leaves the client permanently missing
-        # those cells until the next full snapshot. Merged into the next
-        # successfully-emitted delta, mirroring `_pending_free`. Cleared on a
-        # successful snapshot / seek.
-        self._pending_upsert: set = set()
-        # Consecutive frames dropped by the broadcast queue without a single
-        # successful send. When this (or the pending retransmit volume) grows
-        # large, a full snapshot is emitted instead of a giant merged delta so
-        # the client resyncs cleanly (no transient map bloat / layout jank).
+        # Consecutive queue drops; triggers catchup snapshot when large.
         self._consecutive_drops = 0
         # start paused: the dashboard must explicitly press Play (auto-play
         # off on page load). Seek previews still render one frame while paused.
@@ -91,27 +68,17 @@ class Pipeline:
         self._thread = None
         self._last_snapshot_frame = 0
         self._last_stats_frame = 0
-        self._frame_time_window = []
-        self._stage_window = {"seg": [], "grid": [], "pack": [], "cloud": []}
-        self._project_window = []
-        self._forward_window = []
+        self.metrics = FrameMetrics()
         self._mem = None
-        self._perf_n = 0
-        self._perf_sum = {"seg": 0.0, "grid": 0.0, "pack": 0.0, "proc": 0.0}
         self.cloud_on = False
         self.cloud_max = int(self.cfg["server"].get("cloud_points_max", 30000))
         self._snap_iv = int(self.cfg["server"].get("snapshot_interval_frames", 5))
         self._stats_iv = int(self.cfg["server"].get("stats_interval_frames", 10))
-        self._wire_compress = bool(self.cfg["server"].get("wire_compress", False))
 
-        # Two-stage pipelining: the GPU segmenter runs on its own thread ahead
-        # of the CPU grid/pack/emit stage, so the segmenter's device->host sync
-        # (.cpu()) overlaps the previous frame's grid work instead of stalling
-        # the single pipeline thread. `stages: auto` (default) enables it;
-        # `stages: single` restores the exact previous serial behavior.
+        # Two-stage pipeline: GPU segmenter thread overlaps device->host sync
+        # with the previous frame's grid work. `stages: auto` (default) or `single`.
         self._stages = str(self.cfg.get("pipeline", {}).get("stages", "auto")).lower()
-        # bounded look-ahead of segmented frames: maxsize 2 keeps at most ~1
-        # frame of lead so seek latency stays small and ordering is preserved.
+        # Bounded look-ahead (maxsize 2) keeps seek latency small.
         self._prefetch: queue.Queue = queue.Queue(maxsize=2)
         self._seg_thread = None
 
@@ -128,6 +95,11 @@ class Pipeline:
         self.ready = threading.Event()
         self._first_frame_emitted = False
         self.ready.set()
+
+    @property
+    def messages(self) -> queue.Queue:
+        """Back-compat accessor for the broadcast queue (Broadcaster.messages)."""
+        return self.broadcaster.messages
 
     def start(self):
         self.running = True
@@ -178,19 +150,11 @@ class Pipeline:
             self._last_stats_frame = self.grid.frame - self._stats_iv    # force stats too
             self._mem = None
         self.replayer.seek(idx)
-        while True:
-            try:
-                self.messages.get_nowait()
-            except queue.Empty:
-                break
+        self.broadcaster.clear()
         self._drain_prefetch()
         self._cloud_hist.clear()
-        self._frame_time_window.clear()
-        for buf in self._stage_window.values():
-            buf.clear()
+        self.metrics.reset()
         self.epoch += 1
-        self._pending_free.clear()
-        self._pending_upsert.clear()
         self._consecutive_drops = 0
         with self._seek_lock:
             self._preview = True
@@ -225,21 +189,11 @@ class Pipeline:
             self.seq_id = seq_id
         old_replayer.close()
         self._cloud_hist.clear()
-        self._frame_time_window.clear()
-        for buf in self._stage_window.values():
-            buf.clear()
-        self._frames_emitted = 0
-        self._frames_dropped = 0
-        self._perf_n = 0
-        self._perf_sum = {"seg": 0.0, "grid": 0.0, "pack": 0.0, "proc": 0.0}
-        self._pending_free.clear()
-        self._pending_upsert.clear()
+        self.metrics.reset()
+        self.broadcaster.frames_emitted = 0
+        self.broadcaster.frames_dropped = 0
         self._consecutive_drops = 0
-        while True:
-            try:
-                self.messages.get_nowait()
-            except queue.Empty:
-                break
+        self.broadcaster.clear()
         self._drain_prefetch()
         self.epoch += 1
         with self._seek_lock:
@@ -253,85 +207,10 @@ class Pipeline:
             self._preview = False
             return v
 
-    def _emit(self, payload, kind: str = "text"):
-        """Queue a broadcast payload. kind='text' -> JSON dict, 'binary' -> bytes frame."""
-        if kind != "text" and self._wire_compress:
-            payload = ws_protocol._maybe_compress(payload, enabled=True)
-        item = ("T", payload) if kind == "text" else ("B", payload)
-        # In precise mode every frame is a full snapshot (large). Instead of
-        # dropping just the oldest entry and still overflowing next put, coalesce:
-        # keep only the latest binary frame so we never lag (text stats/ack preserved).
-        is_binary = (kind != "text")
-        try:
-            self.messages.put_nowait(item)
-            self._frames_emitted += 1
-        except queue.Full:
-            if is_binary:
-                # Drain all queued binary frames, keep only text (stats/ack) if any
-                kept: list = []
-                while True:
-                    try:
-                        q = self.messages.get_nowait()
-                        if q[0] == "T":
-                            kept.append(q)
-                        else:
-                            self._frames_dropped += 1
-                    except queue.Empty:
-                        break
-                for k in kept:
-                    try:
-                        self.messages.put_nowait(k)
-                    except queue.Full:
-                        break
-            else:
-                self._drop_oldest()
-                self._frames_dropped += 1
-            try:
-                self.messages.put_nowait(item)
-                self._frames_emitted += 1
-            except queue.Full:
-                self._frames_dropped += 1
-                pass
-
-    def _emit_frame(self, chunks, kind: str = "binary") -> bool:
-        """Enqueue all chunks of one logical frame atomically.
-
-        If the whole frame cannot fit, drop it as a unit (never deliver a
-        truncated/partial frame) and drain queued binary frames to make room
-        (keep text stats/acks). Returns True if the frame was successfully sent,
-        False if it was dropped entirely — the caller may then preserve state
-        (e.g. upsert rows / freed rows) for a later merge instead of silently
-        losing them.
-        """
-        is_binary = kind != "text"
-        if is_binary and self._wire_compress:
-            chunks = [ws_protocol._maybe_compress(c, enabled=True) for c in chunks]
-        items = [("B", c) for c in chunks] if is_binary else [("T", c) for c in chunks]
-        q = self.messages
-        n = len(items)
-        if q.qsize() + n > q.maxsize:
-            # Whole frame won't fit — discard queued binary frames (keep text
-            # stats/acks) and count every dropped binary chunk.
-            kept: list = []
-            while True:
-                try:
-                    it = q.get_nowait()
-                    if it[0] == "T":
-                        kept.append(it)
-                    else:
-                        self._frames_dropped += 1
-                except queue.Empty:
-                    break
-            for k in kept:
-                try:
-                    q.put_nowait(k)
-                except queue.Full:
-                    self._frames_dropped += 1
-            return False
-        for it in items:
-            q.put_nowait(it)
-        self._frames_emitted += n
-        return True
+    # Two-stage pipeline (stages: auto):
+    #   SEG thread: disk read -> GPU segment -> mailbox
+    #   GRID thread: mailbox -> bin_5_to_4 -> grid.update -> pack -> emit
+    # Single-slot handoff guarantees ordering; GPU segmenter runs ~1 frame ahead.
 
     def _single_loop(self):
         stats_iv = self.cfg["server"]["stats_interval_frames"]
@@ -370,16 +249,8 @@ class Pipeline:
             return
         self._single_render(frame, stats_iv, snap_iv, disk_ms=disk_ms)
 
-    # ------------------------------------------------------------------
-    # Two-stage pipeline (stages: auto)
-    #
-    #   SEG thread: paced replayer read (disk) -> GPU segment -> mailbox
-    #   GRID thread: mailbox -> bin_5_to_4 -> grid.update -> pack -> emit
-    #
-    # The single-slot handoff guarantees strict frame ordering while letting the
-    # GPU segmenter run up to ~1 frame ahead, hiding its device->host .cpu()
-    # sync behind the CPU grid work of the previous frame.
-    # ------------------------------------------------------------------
+    # Two-stage pipeline: SEG thread -> single-slot mailbox -> GRID thread.
+    # GPU segmenter runs ~1 frame ahead, overlapping device->host sync with grid work.
 
     def _seg_loop(self):
         while self.running:
@@ -401,8 +272,7 @@ class Pipeline:
                 if frame is None:
                     continue
                 cls5, seg_t = self.segmenter.segment(frame.points)
-                # Blocking put: if the grid thread is behind, we wait here (natural
-                # backpressure) rather than piling up stale frames.
+                # Blocking put: natural backpressure rather than piling up stale frames.
                 self._prefetch.put((epoch, frame, cls5, seg_t, disk_ms))
             except Exception as e:
                 import traceback
@@ -417,7 +287,7 @@ class Pipeline:
             try:
                 epoch, frame, cls5, seg_t, disk_ms = self._prefetch.get(timeout=0.5)
                 if epoch != self.epoch:
-                    # stale frame from before a seek/switch — discard
+                    # stale frame from before a seek/switch, discard
                     continue
                 cls4 = bin_5_to_4(cls5)
                 self._process_frame_seg(frame, cls4, seg_t, stats_iv, snap_iv, disk_ms=disk_ms)
@@ -437,37 +307,20 @@ class Pipeline:
         with self.grid_lock:
             self.grid.update(frame.points, cls4)
             t_update = time.perf_counter()
-            # Both precise and decay modes respect snapshot_interval_frames:
-            # send full snapshot periodically, deltas in between.
-            # This avoids O(n_cells) snapshot cost every frame in precise mode.
-            # When a burst of frames has been dropped (large retransmit backlog),
-            # a full snapshot is emitted instead of a giant merged delta so the
-            # client resyncs cleanly (no transient map bloat / layout jank).
+            # Compute without commit; commit only after successful queue put.
             if self._should_snapshot(snap_iv):
-                snap = self.grid.snapshot()
+                snap = self.grid.compute_snapshot()
                 is_snap = True
-                self._last_snapshot_frame = self.grid.frame
-                self._consecutive_drops = 0
-                snap = self.grid.snapshot()
-                is_snap = True
-                self._last_snapshot_frame = self.grid.frame
             else:
-                snap = self.grid.delta()
+                snap = self.grid.compute_delta()
                 is_snap = False
-                # Merge frees that were computed but dropped earlier (queue
-                # overflow) into this delta so the client never loses a free
-                # (the source of ghost cells). Doing it under the lock keeps
-                # the rendered-mask read consistent with delta().
-                snap["freed"] = self._merge_pending_free(snap["freed"])
-                # Merge re-send upserts computed but dropped earlier into this
-                # delta, mirroring _merge_pending_free, so no added/changed cell
-                # is lost to the client (the other half of the ghost story).
-                snap["rows"], snap["cls"] = self._merge_pending_upsert(snap["rows"], snap["cls"])
             t_snap = time.perf_counter()
             if self.grid.frame - self._last_stats_frame >= stats_iv:
                 # Recompute every interval so rendered KB / compression reflect live scene (was cached static)
                 self._mem = self.grid.memory_report()
-                stats = self._compute_stats(self._mem)
+                stats = self.metrics.compute_stats(
+                    self._mem, self.grid.frame, self.replayer.i, len(self.replayer),
+                    self.broadcaster.frames_emitted, self.broadcaster.frames_dropped)
                 self._last_stats_frame = self.grid.frame
                 stats_msg = ws_protocol.stats_message(stats)
         t_grid = time.perf_counter()
@@ -476,42 +329,31 @@ class Pipeline:
         yaw_cd = self._yaw_cd(frame.idx)
         n_rows = snap["rows"].shape[0]
         if is_snap:
-            # A snapshot is authoritative: the client fully resyncs, so any
-            # previously-pending frees AND upserts are subsumed. Clear them once
-            # we actually manage to send it (dropped snapshots keep them).
             freed = np.zeros((0, 2), dtype=np.float32)
             frames = list(ws_protocol.iter_snapshot_frames(
                 snap["frame"], self.epoch, snap["rows"], snap["cls"], yaw_cd=yaw_cd))
-            sent = self._emit_frame(frames, "binary")
-            if sent:
-                self._pending_free.clear()
-                self._pending_upsert.clear()
-                self._consecutive_drops = 0
-            else:
-                self._consecutive_drops += 1
         else:
-            # snap["freed"] was already merged with pending frees (under lock).
             freed = snap["freed"]
             frames = list(ws_protocol.iter_delta_frames(
                 snap["frame"], self.epoch, snap["rows"], snap["cls"], freed, yaw_cd=yaw_cd))
-            sent = self._emit_frame(frames, "binary")
-            if sent:
-                self._consecutive_drops = 0
-            else:
-                # Frame dropped wholesale — preserve its upserts (new + any
-                # already-merged pending) and its frees for the next successful
-                # delta (cells are still never-sent / not-rendered), so neither
-                # missing cells nor ghost cells are introduced by the drop.
-                self._consecutive_drops += 1
-                self._pending_upsert |= self._rows_to_flat(snap["rows"])
-                if freed.shape[0]:
-                    self._pending_free |= self._free_to_flat(freed)
+        sent = self.broadcaster.emit_frame(frames, "binary")
+        if sent:
+            # Commit only on successful send; no lost or duplicated state.
+            with self.grid_lock:
+                if is_snap:
+                    self.grid.commit_snapshot()
+                    self._last_snapshot_frame = self.grid.frame
+                else:
+                    self.grid.commit_delta(snap)
+            self._consecutive_drops = 0
+            if not self._first_frame_emitted:
+                self._first_frame_emitted = True
+                self.broadcaster.emit({"type": "status", "state": "ready", "msg": "Streaming", "seq_id": self.seq_id}, "text")
+        else:
+            self._consecutive_drops += 1
         n_freed = freed.shape[0]
         n_chunks = len(frames)
         wire_bytes = sum(len(b) for b in frames)
-        if not self._first_frame_emitted:
-            self._first_frame_emitted = True
-            self._emit({"type": "status", "state": "ready", "msg": "Streaming", "seq_id": self.seq_id}, "text")
         t_pack = time.perf_counter()
 
         # cloud only streams while a cloud view is active
@@ -519,12 +361,11 @@ class Pipeline:
         if self.cloud_on:
             tc = time.perf_counter()
             ego = self._accum_stream(frame.points, cls4, frame.idx)
-            # rebase onto the grid's road reference so the cloud ground sits on
-            # the grid floor instead of ~sensor-height below it
+            # Rebase onto grid's road reference so cloud ground sits on the grid floor, not ~sensor-height below.
             cxyz = np.round(ego[0], 2)
             cxyz[:, 2] -= float(self.grid.ground_z)
             for b in ws_protocol.iter_cloud_frames(self.grid.frame, self.epoch, cxyz, ego[1], yaw_cd=yaw_cd):
-                self._emit(b, "binary")
+                self.broadcaster.emit(b, "binary")
             cloud_ms = (time.perf_counter() - tc) * 1000.0
 
         proc_ms = (time.perf_counter() - t0) * 1000.0
@@ -532,54 +373,17 @@ class Pipeline:
         update_ms = self.grid._timings.get("total_ms", 0.0)
         snap_ms = self.grid._timings.get("snapshot_ms", self.grid._timings.get("delta_ms", 0.0))
         pack_ms = (t_pack - t_grid) * 1000.0
-        self._stage_window["seg"].append(seg_timings.get("total", 0.0))
-        self._stage_window["grid"].append(grid_ms)
-        self._stage_window["pack"].append(pack_ms)
-        self._stage_window["cloud"].append(cloud_ms)
-        self._project_window.append(seg_timings.get("project", 0.0))
-        self._forward_window.append(seg_timings.get("forward", 0.0))
-        self._frame_time_window.append(proc_ms)
-        for buf in (self._stage_window["seg"], self._stage_window["grid"],
-                    self._stage_window["pack"], self._stage_window["cloud"],
-                    self._project_window, self._forward_window,
-                    self._frame_time_window):
-            if len(buf) > 100:
-                buf.pop(0)
-
-        # detailed perf log every 30 frames (and on any slow frame)
-        self._perf_n += 1
-        self._perf_sum["seg"] += seg_timings.get('total', 0.0)
-        self._perf_sum["grid"] += grid_ms
-        self._perf_sum["pack"] += pack_ms
-        self._perf_sum["proc"] += proc_ms
-        if self._perf_n >= 30 or proc_ms > 400.0:
-            n = self._perf_n
-            avg = {k: v / n for k, v in self._perf_sum.items()}
-            gt = self.grid._timings
-            tag = "SNAP" if is_snap else "DELTA"
-            print(
-                f"[perf] f={self.grid.frame:5d} {tag:4s} | "
-                f"proc={avg['proc']:.1f}ms seg={avg['seg']:.1f} "
-                f"sync={seg_timings.get('sync',0.0):.1f} disk={disk_ms:.1f} "
-                f"update={update_ms:.1f} snap/delta={snap_ms:.1f} "
-                f"pack={avg['pack']:.1f} cloud={self._stage_window['cloud'][-1]:.1f} | "
-                f"rows={n_rows:5d} freed={n_freed:4d} chunks={n_chunks} "
-                f"wire={wire_bytes/1024:.0f}KB | "
-                f"rendered={self.grid._last_n_rendered:6d} "
-                f"hit={self.grid._last_n_hit:5d} "
-                f"n_cells={self.grid.n_cells} | "
-                f"polar={gt.get('polar_ms',0):.1f} "
-                f"reduce={gt.get('reduce_ms',0):.1f} "
-                f"cls={gt.get('cls_ms',0):.1f} "
-                f"state={gt.get('state_ms',0):.1f} | "
-                f"queue={self.messages.qsize()}"
-            )
-            self._perf_n = 0
-            self._perf_sum = {"seg": 0.0, "grid": 0.0, "pack": 0.0, "proc": 0.0}
+        self.metrics.push_frame(
+            seg_timings.get("total", 0.0), grid_ms, pack_ms, cloud_ms,
+            seg_timings.get("project", 0.0), seg_timings.get("forward", 0.0), proc_ms)
+        self.metrics.maybe_log_perf(
+            self.grid, seg_timings.get('total', 0.0), disk_ms, update_ms, snap_ms, pack_ms,
+            proc_ms, is_snap, n_rows, n_freed, n_chunks, wire_bytes, cloud_ms,
+            self.broadcaster.qsize)
 
         if stats_msg is not None:
             stats_msg["epoch"] = self.epoch
-            self._emit(stats_msg, "text")
+            self.broadcaster.emit(stats_msg, "text")
 
     def _yaw_cd(self, idx: int) -> int:
         """Ego forward yaw in centi-degrees for heading-up UI (0 if unknown).
@@ -626,12 +430,6 @@ class Pipeline:
         stride = max(1, int(np.ceil(n / self.cloud_max)))
         return points[::stride, :3].astype(np.float32), cls4[::stride].astype(np.uint8)
 
-    def _drop_oldest(self):
-        try:
-            self.messages.get_nowait()
-        except queue.Empty:
-            pass
-
     def _drain_prefetch(self):
         """Discard any in-flight segmented frames (stale after a seek/switch)."""
         while True:
@@ -640,110 +438,14 @@ class Pipeline:
             except queue.Empty:
                 break
 
-    def _free_to_flat(self, freed: np.ndarray) -> set:
-        """Convert freed rows [i,j] into a set of flat cell indices (i*n_theta+j)."""
-        if freed.size == 0:
-            return set()
-        i = freed[:, 0].astype(np.int64)
-        j = freed[:, 1].astype(np.int64)
-        return set((i * self.grid.n_theta + j).tolist())
-
-    def _rows_to_flat(self, rows: np.ndarray) -> set:
-        """Convert upsert rows [i,j,...] into a set of flat cell indices."""
-        if rows.shape[0] == 0:
-            return set()
-        i = rows[:, 0].astype(np.int64)
-        j = rows[:, 1].astype(np.int64)
-        return set((i * self.grid.n_theta + j).tolist())
-
     def _should_snapshot(self, snap_iv: int) -> bool:
         """True when the frame should be sent as a full (authoritative) snapshot
-        instead of an incremental delta: either the periodic cadence is due, or a
-        burst of dropped frames / large pending retransmit backlog would
-        otherwise produce a giant merged delta (the source of transient client
-        map bloat)."""
+        instead of an incremental delta: either the periodic cadence is due, or
+        enough consecutive frames have been dropped that a giant cumulative delta
+        would cost more wire bytes than the snapshot it replaces."""
         if self.grid.frame - self._last_snapshot_frame >= snap_iv:
             return True
-        backlog = len(self._pending_free) + len(self._pending_upsert)
-        return (
-            self._consecutive_drops >= self.CATCHUP_DROP_THRESHOLD
-            or backlog >= self.CATCHUP_PENDING_THRESHOLD
-        )
-
-    def _merge_pending_upsert(self, rows: np.ndarray, cls: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Merge re-send upsert rows from deltas that were dropped by the queue
-        into the current delta's upsert rows, so added/changed cells are never
-        lost to the client (the counterpart of _merge_pending_free, which only
-        covers frees).
-
-        Pending cells that are no longer rendered are dropped: their removal was
-        already conveyed by a delta() `freed`. Rows are re-read fresh from the
-        grid so the client always gets current state. The pending set is cleared
-        after merging; if the merged frame is itself dropped, the caller
-        re-stashes the flat indices. Caller must hold self.grid_lock."""
-        if not self._pending_upsert:
-            return rows, cls
-        pending = self._pending_upsert
-        self._pending_upsert = set()
-        rendered = self.grid.rendered()
-        alive_idx = np.asarray([f for f in pending if rendered[f]], dtype=np.int64)
-        if alive_idx.size == 0:
-            return rows, cls
-        a_rows, a_cls = self.grid._rows(alive_idx)
-        if rows.shape[0]:
-            return np.concatenate([rows, a_rows], axis=0), np.concatenate([cls, a_cls], axis=0)
-        return a_rows, a_cls
-
-    def _merge_pending_free(self, freed: np.ndarray) -> np.ndarray:
-        """Merge this frame's freed rows with any pending frees from frames that
-        were dropped by the queue. Pending frees are filtered against the current
-        rendered mask so a cell that was freed then re-added is NOT freed again
-        (which would wrongly remove the fresh cell). The pending set is cleared
-        after merging. Caller must hold self.grid_lock (reads rendered())."""
-        if not self._pending_free:
-            return freed
-        not_rendered = ~self.grid.rendered()
-        alive = [f for f in self._pending_free if not_rendered[f]]
-        self._pending_free = set()
-        if not alive:
-            return freed
-        flat = np.asarray(alive, dtype=np.int64)
-        pend = np.stack([
-            (flat // self.grid.n_theta).astype(np.float32),
-            (flat % self.grid.n_theta).astype(np.float32),
-        ], axis=1)
-        if freed.size:
-            return np.concatenate([pend, freed], axis=0)
-        return pend
-
-    def _compute_stats(self, mem: dict) -> dict:
-        win = self._frame_time_window
-        avg_ms = float(np.mean(win)) if win else 0.0
-        latency_p50 = float(np.percentile(win, 50)) if win else 0.0
-        latency_p95 = float(np.percentile(win, 95)) if win else 0.0
-        stages = {k: round(float(np.mean(v)), 1) if v else 0.0 for k, v in self._stage_window.items()}
-        return {
-            "frame": self.grid.frame,
-            "fps": 1000.0 / max(avg_ms, 1e-3),
-            "latency_ms_p50": round(latency_p50, 1),
-            "latency_ms_p95": round(latency_p95, 1),
-            "seg_ms": stages["seg"],
-            "grid_ms": stages["grid"],
-            "pack_ms": stages["pack"],
-            "cloud_ms": stages["cloud"],
-            "project_ms": round(float(np.mean(self._project_window)), 1) if self._project_window else 0.0,
-            "forward_ms": round(float(np.mean(self._forward_window)), 1) if self._forward_window else 0.0,
-            "grid_mem_kb": mem.get("rendered_kb", mem["grid_kb"]),
-            "uniform_equiv_mb": mem["uniform_mb"],
-            "compression_ratio": mem["compression_ratio"],
-            "capacity_compression": mem.get("capacity_compression", mem["compression_ratio"]),
-            "rendered_cells": mem.get("rendered_cells", 0),
-            "n_cells": mem["n_cells"],
-            "seq_pos": self.replayer.i,
-            "seq_len": len(self.replayer),
-            "frames_emitted": self._frames_emitted,
-            "frames_dropped": self._frames_dropped,
-        }
+        return self._consecutive_drops >= self.CATCHUP_DROP_THRESHOLD
 
 
 def _load_pose_mats(seq_dir: str | Path) -> np.ndarray | None:
@@ -796,6 +498,83 @@ def load_history(ckpt_dir: str | Path) -> list[dict]:
     return out
 
 
+async def _fan_out(connections: set, item):
+    """Send one queued broadcast item (('B', bytes) | ('T', dict)) to every live ws.
+
+    Sends are collected then awaited via asyncio.gather so slow clients do not
+    serialize / pace the whole fan-out (each ws send is independent; websocket
+    adapter serializes per-connection sends internally)."""
+    is_bin = item[0] == "B"
+    text = None if is_bin else json.dumps(item[1])
+    raw = item[1] if is_bin else None
+    live = [ws for ws in connections if ws.application_state.name != "DISCONNECTED"]
+    if not live:
+        return
+    dead = []
+    async def _send(ws):
+        try:
+            if is_bin:
+                await ws.send_bytes(raw)
+            else:
+                await ws.send_text(text)
+        except Exception:
+            dead.append(ws)
+    await asyncio.gather(*(_send(ws) for ws in live))
+    for ws in dead:
+        connections.discard(ws)
+
+
+async def _broadcast_loop(connections: set, messages: queue.Queue):
+    """Drain the pipeline's broadcast queue and fan each item out to live ws."""
+    loop = asyncio.get_event_loop()
+    while True:
+        try:
+            item = await loop.run_in_executor(None, messages.get)
+        except asyncio.CancelledError:
+            break
+        await _fan_out(connections, item)
+
+
+async def _control_ack(pipeline: "Pipeline", ws, action: str, **extra):
+    await ws.send_text(json.dumps({
+        "type": "control_ack", "action": action,
+        "frame": pipeline.grid.frame, **extra}))
+
+
+async def _handle_control_message(pipeline: "Pipeline", ws, data: dict) -> bool:
+    """Apply one ws 'control' command. Returns False when the message is not a control."""
+    if data.get("type") != "control":
+        return False
+    action = data.get("action")
+    if action == "pause":
+        pipeline.pause(True)
+        print(f"[ws] pause ack frame={pipeline.grid.frame}")
+        await _control_ack(pipeline, ws, "pause")
+    elif action == "play":
+        pipeline.pause(False)
+        print(f"[ws] play ack frame={pipeline.grid.frame}")
+        await _control_ack(pipeline, ws, "play")
+        if not pipeline._first_frame_emitted:
+            await ws.send_text(json.dumps(
+                {"type": "status", "state": "buffering", "msg": "Processing first frame\u2026", "seq_id": pipeline.seq_id}))
+    elif action == "speed":
+        pipeline.set_speed(data.get("value", 1.0))
+    elif action == "cloud":
+        pipeline.cloud_on = bool(data.get("value", False))
+        print(f"[server] cloud stream {'ON' if pipeline.cloud_on else 'OFF'}")
+    elif action == "seek":
+        pipeline.seek(data.get("value", 0))
+        await _control_ack(pipeline, ws, "seek", idx=pipeline.replayer.i, epoch=pipeline.epoch)
+    elif action == "switch_sequence":
+        seq_id = data.get("value", "")
+        print(f"[ws] switch_sequence -> {seq_id}")
+        pipeline.switch_sequence(seq_id)
+        await _control_ack(pipeline, ws, "switch_sequence",
+                           seq_id=pipeline.seq_id, seq_len=len(pipeline.replayer),
+                           epoch=pipeline.epoch)
+    return True
+
+
 def create_app(cfg: dict | None = None) -> FastAPI:
     if cfg is None:
         cfg = load_pipeline_config()
@@ -805,42 +584,24 @@ def create_app(cfg: dict | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         pipeline.start()
-        broadcaster = asyncio.create_task(_broadcast_loop())
+        broadcaster = asyncio.create_task(_broadcast_loop(connections, pipeline.messages))
         try:
             yield
         finally:
             broadcaster.cancel()
             pipeline.stop()
 
-    async def _broadcast_loop():
-        loop = asyncio.get_event_loop()
-        while True:
-            try:
-                item = await loop.run_in_executor(None, pipeline.messages.get)
-            except asyncio.CancelledError:
-                break
-            is_bin = item[0] == "B"
-            text = None if is_bin else json.dumps(item[1])
-            raw = item[1] if is_bin else None
-            dead = []
-            for ws in list(connections):
-                if ws.application_state.name == "DISCONNECTED":
-                    dead.append(ws)
-                    continue
-                try:
-                    if is_bin:
-                        await ws.send_bytes(raw)
-                    else:
-                        await ws.send_text(text)
-                except Exception:
-                    dead.append(ws)
-            for ws in dead:
-                connections.discard(ws)
-
     app = FastAPI(title="pc2d live mapping", lifespan=lifespan)
+    cors_origins = [
+        origin.strip()
+        for origin in str(cfg.get("dashboard", {}).get("cors_origins", "")).split(",")
+        if origin.strip()
+    ]
+    # Allow any Cloudflare Pages deployment (production + preview); WS connections are not covered by CORS.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+        allow_origins=cors_origins,
+        allow_origin_regex=r"https://.*\.pages\.dev",
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -928,47 +689,15 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                     data = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
-                if data.get("type") == "control":
-                    action = data.get("action")
-                    if action == "pause":
-                        pipeline.pause(True)
-                        print(f"[ws] pause ack frame={pipeline.grid.frame}")
-                        await ws.send_text(json.dumps(
-                            {"type": "control_ack", "action": "pause", "frame": pipeline.grid.frame}))
-                    elif action == "play":
-                        pipeline.pause(False)
-                        print(f"[ws] play ack frame={pipeline.grid.frame}")
-                        await ws.send_text(json.dumps(
-                            {"type": "control_ack", "action": "play", "frame": pipeline.grid.frame}))
-                        if not pipeline._first_frame_emitted:
-                            await ws.send_text(json.dumps(
-                                {"type": "status", "state": "buffering", "msg": "Processing first frame\u2026", "seq_id": pipeline.seq_id}))
-                    elif action == "speed":
-                        pipeline.set_speed(data.get("value", 1.0))
-                    elif action == "cloud":
-                        pipeline.cloud_on = bool(data.get("value", False))
-                        print(f"[server] cloud stream {'ON' if pipeline.cloud_on else 'OFF'}")
-                    elif action == "seek":
-                        pipeline.seek(data.get("value", 0))
-                        await ws.send_text(json.dumps({
-                            "type": "control_ack", "action": "seek",
-                            "frame": pipeline.grid.frame, "idx": pipeline.replayer.i,
-                            "epoch": pipeline.epoch}))
-                    elif action == "switch_sequence":
-                        seq_id = data.get("value", "")
-                        print(f"[ws] switch_sequence -> {seq_id}")
-                        pipeline.switch_sequence(seq_id)
-                        await ws.send_text(json.dumps({
-                            "type": "control_ack", "action": "switch_sequence",
-                            "seq_id": pipeline.seq_id,
-                            "seq_len": len(pipeline.replayer),
-                            "frame": pipeline.grid.frame,
-                            "epoch": pipeline.epoch}))
-                elif data.get("type") == "request_snapshot":
+                if await _handle_control_message(pipeline, ws, data):
+                    continue
+                if data.get("type") == "request_snapshot":
+                    # Compute snapshot WITHOUT commit; must not mutate sent-state.
                     with pipeline.grid_lock:
-                        snap = pipeline.grid.snapshot()
-                    for b in ws_protocol.iter_snapshot_frames(snap["frame"], pipeline.epoch, snap["rows"], snap["cls"],
-                                              yaw_cd=pipeline._yaw_cd(pipeline.replayer.i)):
+                        snap = pipeline.grid.compute_snapshot()
+                    for b in ws_protocol.iter_snapshot_frames(
+                            snap["frame"], pipeline.epoch, snap["rows"], snap["cls"],
+                            yaw_cd=pipeline._yaw_cd(pipeline.replayer.i)):
                         await ws.send_bytes(b)
         except WebSocketDisconnect:
             pass

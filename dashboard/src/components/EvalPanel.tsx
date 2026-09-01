@@ -20,7 +20,7 @@ const API = process.env.NEXT_PUBLIC_PC2D_API ?? "http://localhost:8000";
 
 type ClassIou = Record<string, number>;
 type Band = Record<string, { miou: number; class_ious: ClassIou }>;
-type Latency = { mean: number; std: number; min: number; max: number };
+type Latency = { mean: number; std: number; min: number; max: number; median: number; p90: number };
 
 type EvalResult = {
   timestamp: string;
@@ -35,7 +35,7 @@ type EvalResult = {
     class_ious_4: ClassIou;
     per_distance_band_4class: Band;
     latency_ms: Latency;
-  };
+  } | null;
   point: {
     n_scans: number;
     miou_5class: number;
@@ -44,8 +44,8 @@ type EvalResult = {
     class_ious_4: ClassIou;
     per_distance_band_4class: Band;
     latency_ms: Latency;
-  };
-  memory: { peak_rss_mb: number; gpu_peak_mb: number };
+  } | null;
+  memory: { peak_rss_mb: number; gpu_peak_mb: number | null; gpu_reserved_mb?: number | null };
 };
 
 const CLASS_META: Record<string, { label: string; color: string }> = {
@@ -192,12 +192,12 @@ export default function EvalPanel() {
       .finally(() => setLoading(false));
   }, []);
 
-  const pixelBars4 = useMemo(() => (data ? classRows(data.pixel.class_ious_4) : []), [data]);
-  const pixelBars5 = useMemo(() => (data ? classRows(data.pixel.class_ious_5) : []), [data]);
-  const pointBars4 = useMemo(() => (data ? classRows(data.point.class_ious_4) : []), [data]);
-  const pointBars5 = useMemo(() => (data ? classRows(data.point.class_ious_5) : []), [data]);
-  const pixelBands = useMemo(() => (data ? bandRows(data.pixel.per_distance_band_4class) : []), [data]);
-  const pointBands = useMemo(() => (data ? bandRows(data.point.per_distance_band_4class) : []), [data]);
+  const pixelBars4 = useMemo(() => (data?.pixel ? classRows(data.pixel.class_ious_4) : []), [data]);
+  const pixelBars5 = useMemo(() => (data?.pixel ? classRows(data.pixel.class_ious_5) : []), [data]);
+  const pointBars4 = useMemo(() => (data?.point ? classRows(data.point.class_ious_4) : []), [data]);
+  const pointBars5 = useMemo(() => (data?.point ? classRows(data.point.class_ious_5) : []), [data]);
+  const pixelBands = useMemo(() => (data?.pixel ? bandRows(data.pixel.per_distance_band_4class) : []), [data]);
+  const pointBands = useMemo(() => (data?.point ? bandRows(data.point.per_distance_band_4class) : []), [data]);
 
   if (loading) return <Loading label="Loading evaluation" />;
   if (error)
@@ -206,7 +206,7 @@ export default function EvalPanel() {
         Failed to load eval results: {error}
       </div>
     );
-  if (!data?.pixel)
+  if (!data?.pixel && !data?.point)
     return (
       <div className="mx-auto max-w-6xl px-6 py-8 text-sm text-zinc-400">
         No eval results found (run eval/run_evaluation.py first).
@@ -234,45 +234,72 @@ export default function EvalPanel() {
       </header>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Card label="Pixel mIoU (4-class)" value={fmtPct(data.pixel.miou_4class)} sub={`${data.pixel.n_samples} samples`} />
-        <Card label="Pixel mIoU (5-class)" value={fmtPct(data.pixel.miou_5class)} />
-        <Card label="Point mIoU (4-class)" value={fmtPct(data.point.miou_4class)} sub={`${data.point.n_scans} scans`} />
-        <Card label="Point mIoU (5-class)" value={fmtPct(data.point.miou_5class)} />
+        {data.pixel ? (
+          <>
+            <Card label="Pixel mIoU (4-class)" value={fmtPct(data.pixel.miou_4class)} sub={`${data.pixel.n_samples} samples`} />
+            <Card label="Pixel mIoU (5-class)" value={fmtPct(data.pixel.miou_5class)} />
+          </>
+        ) : (
+          <>
+            <Card label="Pixel mIoU (4-class)" value="-" sub="no pixel eval" />
+            <Card label="Pixel mIoU (5-class)" value="-" />
+          </>
+        )}
+        {data.point ? (
+          <>
+            <Card label="Point mIoU (4-class)" value={fmtPct(data.point.miou_4class)} sub={`${data.point.n_scans} scans`} />
+            <Card label="Point mIoU (5-class)" value={fmtPct(data.point.miou_5class)} />
+          </>
+        ) : (
+          <>
+            <Card label="Point mIoU (4-class)" value="-" sub="no point eval" />
+            <Card label="Point mIoU (5-class)" value="-" />
+          </>
+        )}
       </div>
 
-      <div className="space-y-6">
-        <h2 className="hud-sec">Pixel level</h2>
-        <div className="grid gap-4 lg:grid-cols-2">
-          <ClassIoUChart title="Per-class IoU (4-class)" data={pixelBars4} />
-          <ClassIoUChart title="Per-class IoU (5-class)" data={pixelBars5} />
+      {data.pixel && (
+        <div className="space-y-6">
+          <h2 className="hud-sec">Pixel level</h2>
+          <div className="grid gap-4 lg:grid-cols-2">
+            <ClassIoUChart title="Per-class IoU (4-class)" data={pixelBars4} />
+            <ClassIoUChart title="Per-class IoU (5-class)" data={pixelBars5} />
+          </div>
+          <BandChart title="Pixel mIoU by distance band (4-class)" data={pixelBands} color="#22d3ee" />
         </div>
-        <BandChart title="Pixel mIoU by distance band (4-class)" data={pixelBands} color="#22d3ee" />
-      </div>
+      )}
 
-      <div className="space-y-6">
-        <h2 className="hud-sec">Point level</h2>
-        <div className="grid gap-4 lg:grid-cols-2">
-          <ClassIoUChart title="Per-class IoU (4-class)" data={pointBars4} />
-          <ClassIoUChart title="Per-class IoU (5-class)" data={pointBars5} />
+      {data.point && (
+        <div className="space-y-6">
+          <h2 className="hud-sec">Point level</h2>
+          <div className="grid gap-4 lg:grid-cols-2">
+            <ClassIoUChart title="Per-class IoU (4-class)" data={pointBars4} />
+            <ClassIoUChart title="Per-class IoU (5-class)" data={pointBars5} />
+          </div>
+          <BandChart title="Point mIoU by distance band (4-class)" data={pointBands} color="#a78bfa" />
         </div>
-        <BandChart title="Point mIoU by distance band (4-class)" data={pointBands} color="#a78bfa" />
-      </div>
+      )}
 
-      <div className="grid gap-3 md:grid-cols-3">
+      <div className="grid gap-3 md:grid-cols-4">
         <Card
           label="Pixel latency"
-          value={`${data.pixel.latency_ms.mean?.toFixed(1) ?? "-"} ms`}
-          sub={`std ${data.pixel.latency_ms.std?.toFixed(1) ?? "-"} ms`}
+          value={data.pixel ? `${data.pixel.latency_ms.median?.toFixed(1) ?? "-"} ms` : "-"}
+          sub={data.pixel ? `p90 ${data.pixel.latency_ms.p90?.toFixed(1) ?? "-"} ms` : ""}
         />
         <Card
           label="Point latency"
-          value={`${data.point.latency_ms.mean?.toFixed(1) ?? "-"} ms`}
-          sub={`std ${data.point.latency_ms.std?.toFixed(1) ?? "-"} ms`}
+          value={data.point ? `${data.point.latency_ms.median?.toFixed(1) ?? "-"} ms` : "-"}
+          sub={data.point ? `p90 ${data.point.latency_ms.p90?.toFixed(1) ?? "-"} ms` : ""}
         />
         <Card
-          label="Memory"
+          label="Peak RSS"
           value={`${data.memory.peak_rss_mb?.toFixed(0) ?? "-"} MB`}
-          sub={data.memory.gpu_peak_mb ? `GPU ${data.memory.gpu_peak_mb.toFixed(0)} MB` : "-"}
+          sub={data.memory.gpu_peak_mb != null ? `GPU ${data.memory.gpu_peak_mb.toFixed(0)} MB` : "-"}
+        />
+        <Card
+          label="GPU Reserved"
+          value={data.memory.gpu_reserved_mb != null ? `${data.memory.gpu_reserved_mb.toFixed(0)} MB` : "-"}
+          sub={data.memory.gpu_peak_mb != null ? `allocated ${data.memory.gpu_peak_mb.toFixed(0)} MB` : ""}
         />
       </div>
     </div>

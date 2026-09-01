@@ -17,8 +17,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-# torch.onnx prints UTF-8 glyphs (e.g. checkmarks) that can crash a plain
-# cp1252 Windows console; make stdio non-fatal regardless of codepage.
+# torch.onnx prints UTF-8 glyphs that can crash a cp1252 Windows console; make stdio non-fatal.
 if hasattr(sys.stdout, "reconfigure") and sys.stdout is not None:
     try:
         sys.stdout.reconfigure(errors="replace")

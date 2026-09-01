@@ -1,32 +1,27 @@
-# Log-polar variable-resolution 2.5D grid engine parameters (PROJECT_SPEC §9)
+# Log-polar variable-resolution 2.5D grid engine parameters (PROJECT_SPEC S.9)
 #
 # Two-phase ring geometry (PS: "5cm cells within 10m, 50cm cells up to 100m"):
-#   Phase 1 (r_min → r_transition): uniform 5 cm rings (alpha = 1.0)
-#   Phase 2 (r_transition → r_max):  geometric growth from 5 cm → ~50 cm
+#   Phase 1 (r_min -> r_transition): uniform 5 cm rings (alpha = 1.0)
+#   Phase 2 (r_transition -> r_max):  geometric growth from 5 cm -> ~50 cm
 # Seamless: Phase 2 first ring = dr_0, matching Phase 1 last ring exactly.
 grid:
   r_min: 0.5          # inner dead zone radius (m); points closer are ignored for grid
   r_max: 100.0        # outer cutoff (m)
-  dr_0: 0.05          # ring base radial width (m) — 5 cm
+  dr_0: 0.05          # ring base radial width (m) - 5 cm
   r_transition: 10.0  # boundary (m) between Phase 1 (uniform) and Phase 2 (geometric)
-  alpha: 1.004994     # Phase 2 geometric growth factor: 5 cm → ~50 cm at 100 m
+  alpha: 1.004994     # Phase 2 geometric growth factor: 5 cm -> ~50 cm at 100 m
   n_theta: 720        # angular sectors (0.5 deg each)
   z_min: -5.0         # elevation clamp (m) relative to sensor plane
   z_max: 10.0
   n_classes: 4        # canonical classes displayed in the dashboard
-
-decay:
-  enabled: false      # AP0 precise sensor mode: no temporal decay, grid shows live scan only (if true, uses tau_free)
-  tau_free: 1.5       # seconds for occupancy decay when enabled (occupancy -> exp(-dt/tau)); ignored when enabled=false
-  frame_hz: 10.0
-  occupancy_gain: 1.0 # per-frame occupancy for hit cells when precise (1.0 = fully occupied this frame)
+  occupancy_gain: 1.0 # per-frame occupancy for hit cells (1.0 = fully occupied this frame)
   occ_threshold: 0.2  # rendered/occupied threshold
 
 traversability:
   enabled: true
   weights: [0.25, 0.25, 0.35, 0.15]  # [z_score, slope_score, class_score, occ_score]
-  z_diff_thresh: 0.5                 # height above mean threshold (m) — above this = steep
-  slope_thresh: 0.4                  # neighbor slope threshold — above this = steep (~22 deg)
+  z_diff_thresh: 0.5                 # height above mean threshold (m); above this = steep
+  slope_thresh: 0.4                  # neighbor slope threshold; above this = steep (~22 deg)
   class_scores: [1.0, 0.6, 0.2, 0.1]    # per-class: drivable=1.0, terrain=0.6, static=0.2, dynamic=0.1
 
 memory:

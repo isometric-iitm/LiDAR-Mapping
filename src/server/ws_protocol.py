@@ -36,29 +36,22 @@ def grid_meta_message(grid) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Binary WS framing. Header: struct "<IHHQQiiiii" = 44 bytes:
-#   <I magic (0x50433244) | <H code (1=snapshot 2=delta 3=cloud) | <H version |
-#   <Q frame | <Q epoch | <i n_a | <i n_b | <i seq | <i total | <i yaw_cd
-# yaw_cd = ego forward yaw in centi-degrees (heading-up rendering), 0 if unknown.
-# Body (all little-endian raw arrays, no JSON number tax):
-#   snapshot: n_a rows x {i,j,z_mean,z_max,occ,dyn as f32} then n_a bytes cls u8.
-#   Each row record is padded to 28 bytes (24 f32 + 1 cls + 3 pad) so any
-#   following section (delta freed rows) stays 4-byte aligned for typed-array
-#   views on the client.
-#   delta:    n_a updated rows (as snapshot rows), then n_b freed rows x {i,j as f32}
-#   cloud:    n_a points x {x,y,z as f32} then n_a bytes cls u8
-# ---------------------------------------------------------------------------
+# Binary WS framing: header "<IHHQQiiiii" (44 bytes):
+#   magic(0x50433244) code(1=snap,2=delta,3=cloud) version frame epoch n_a n_b seq total yaw_cd
+# Row record: 28 bytes (6 f32 [i,j,z_mean,z_max,occ,trav] + 1 u8 cls + 3 pad).
+#   snapshot: n_a rows + n_a cls bytes
+#   delta: n_a rows + n_a cls bytes + n_b freed rows (2 f32 each)
+#   cloud: n_a xyz f32 + n_a cls bytes
 _MAGIC = 0x50433244
-_VERSION = 2
+_VERSION = 3
 K_SNAPSHOT = 1
 K_DELTA = 2
 K_CLOUD = 3
 _HEAD = struct.Struct("<IHHQQiiiii")
 _HEAD_LEN = _HEAD.size          # 44
-_ROW_F32 = 7 * 4                # i,j,z_mean,z_max,occ,dyn,trav = 28 bytes
-_ROW_PAD = 3                    # pad cls tail out to 4-byte alignment (28+1+3=32)
-_ROW_TOTAL = _ROW_F32 + 1 + _ROW_PAD  # 32 bytes per grid row record
+_ROW_F32 = 6 * 4                # i,j,z_mean,z_max,occ,trav = 24 bytes
+_ROW_PAD = 3                    # pad cls tail out to 4-byte alignment (24+1+3=28)
+_ROW_TOTAL = _ROW_F32 + 1 + _ROW_PAD  # 28 bytes per grid row record
 _PAD3 = b"\x00" * _ROW_PAD
 CHUNK_CELLS = 8000
 
@@ -117,7 +110,7 @@ def iter_cloud_frames(frame: int, epoch: int, xyz: np.ndarray, cls: np.ndarray,
         yield (_head(K_CLOUD, frame, epoch, e - s, 0, p, total, yaw_cd) + body)
 
 
-# --- Compression (optional, toggled via config) ---
+# Compression (optional, toggled via config)
 _COMPRESS_LEVEL = 1  # zlib fastest (1-9); level 1 is ~50 MB/s compression, ~200 MB/s decompress
 _COMPRESS_THRESHOLD = 512  # don't bother compressing payloads under this many bytes
 
@@ -149,15 +142,15 @@ def decompress_if_needed(data: bytes) -> bytes:
     return data
 
 
-# --- JSON variants (HTTP endpoints / legacy) ---
+# JSON variants (HTTP endpoints / legacy)
 def snapshot_message(grid) -> dict:
-    snap = grid.snapshot()
+    snap = grid.compute_snapshot()
     cells = np.concatenate([snap["rows"], snap["cls"].reshape(-1, 1).astype(np.float32)], axis=1).tolist()
     return {"type": "snapshot", "frame": snap["frame"], "cells": cells}
 
 
 def delta_message(grid) -> dict:
-    d = grid.delta()
+    d = grid.compute_delta()
     return {"type": "delta", "frame": d["frame"], "updated": d["rows"].tolist(), "freed": d["freed"].tolist()}
 
 

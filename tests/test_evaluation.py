@@ -196,10 +196,10 @@ def test_generate_summary(tmp_path):
             "miou_4class": 0.6,
             "class_ious_4": {"a": 0.5, "b": 0.4, "c": 0.3, "d": 0.2},
             "per_distance_band_4class": {bn: {"miou": 0.5} for bn in BAND_NAMES},
-            "latency_ms": {"mean": 10.0, "std": 2.0},
+            "latency_ms": {"mean": 10.0, "std": 2.0, "median": 9.5, "p90": 12.0},
         },
         "point": None,
-        "memory": {"peak_rss_mb": 500.0, "gpu_peak_mb": None},
+        "memory": {"peak_rss_mb": 500.0, "gpu_peak_mb": None, "gpu_reserved_mb": None},
     }
     generate_summary(results, tmp_path)
     summary = (tmp_path / "eval_summary.md").read_text(encoding="utf-8")
@@ -218,7 +218,7 @@ def test_generate_summary_with_point(tmp_path):
             "miou_4class": 0.6,
             "class_ious_4": {"a": 0.5, "b": 0.4, "c": 0.3, "d": 0.2},
             "per_distance_band_4class": {bn: {"miou": 0.5} for bn in BAND_NAMES},
-            "latency_ms": {"mean": 10.0, "std": 2.0},
+            "latency_ms": {"mean": 10.0, "std": 2.0, "median": 9.5, "p90": 12.0},
         },
         "point": {
             "n_scans": 50,
@@ -226,14 +226,14 @@ def test_generate_summary_with_point(tmp_path):
             "miou_4class": 0.5,
             "class_ious_4": {"a": 0.4, "b": 0.3, "c": 0.2, "d": 0.1},
             "per_distance_band_4class": {bn: {"miou": 0.4} for bn in BAND_NAMES},
-            "latency_ms": {"mean": 50.0, "std": 5.0},
+            "latency_ms": {"mean": 50.0, "std": 5.0, "median": 48.0, "p90": 55.0},
         },
-        "memory": {"peak_rss_mb": 500.0, "gpu_peak_mb": 2000.0},
+        "memory": {"peak_rss_mb": 500.0, "gpu_peak_mb": 2000.0, "gpu_reserved_mb": 2500.0},
     }
     generate_summary(results, tmp_path)
     summary = (tmp_path / "eval_summary.md").read_text(encoding="utf-8")
     assert "Point-Level" in summary
-    assert "GPU Peak" in summary
+    assert "GPU Allocated" in summary
 
 
 def test_inject_results(tmp_path):
@@ -252,10 +252,10 @@ def test_inject_results(tmp_path):
             "miou_4class": 0.6,
             "class_ious_4": {"drivable": 0.5, "terrain": 0.4, "obstacle": 0.3, "dynamic": 0.2},
             "per_distance_band_4class": {bn: {"miou": 0.5} for bn in BAND_NAMES},
-            "latency_ms": {"mean": 10.0, "std": 2.0},
+            "latency_ms": {"mean": 10.0, "std": 2.0, "median": 9.5, "p90": 12.0},
         },
         "point": None,
-        "memory": {"peak_rss_mb": 100.0, "gpu_peak_mb": None},
+        "memory": {"peak_rss_mb": 100.0, "gpu_peak_mb": None, "gpu_reserved_mb": None},
     }
     (results_dir / "eval_20260101_000000.json").write_text(
         json.dumps(data), encoding="utf-8")
@@ -287,10 +287,10 @@ def test_inject_results_skips_existing_markers(tmp_path):
             "miou_4class": 0.8,
             "class_ious_4": {"drivable": 0.8, "terrain": 0.7, "obstacle": 0.6, "dynamic": 0.5},
             "per_distance_band_4class": {bn: {"miou": 0.7} for bn in BAND_NAMES},
-            "latency_ms": {"mean": 8.0, "std": 1.0},
+            "latency_ms": {"mean": 8.0, "std": 1.0, "median": 7.5, "p90": 9.0},
         },
         "point": None,
-        "memory": {"peak_rss_mb": 100.0, "gpu_peak_mb": None},
+        "memory": {"peak_rss_mb": 100.0, "gpu_peak_mb": None, "gpu_reserved_mb": None},
     }
     (results_dir / "eval_20260101_000000.json").write_text(
         json.dumps(data), encoding="utf-8")

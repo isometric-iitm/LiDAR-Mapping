@@ -21,14 +21,14 @@ Real-time 3D semantic map viewer and training curves for the PC2D LiDAR mapping 
 - **Segmented point cloud** - class-colored per-point overlay from the UNet's KNN back-projection
 - **Raw point cloud comparison** - height-gradient colored overlay for side-by-side inspection
 - **Compare mode** - segmented and raw clouds overlaid simultaneously
-- **Playback controls** - pause, seek, speed (0.5×-5×), with heading-up camera convention
+- **Playback controls** - pause, seek, speed (0.5x-5x), with heading-up camera convention
 - **Live metrics** - FPS, per-stage latency (segment / project / forward / grid / pack / cloud), memory
 - **Memory comparison** - side-by-side bars: log-polar grid (~220 KB) vs uniform 5 cm grid (~1.6 GB)
 - **Cell hover inspection** - class, height, occupancy %, dynamic score, range, bearing
 - **Training curves** - mIoU (4-class, 5-class), validation loss, per-class IoU over training steps
 - **Evaluation** - pixel + point level mIoU, per-class IoU, per-distance-band mIoU, latency, memory
 - **Iconoir icons** - Play/Pause, compass (north-up), and page navigation use the [Iconoir](https://iconoir.com/) icon set
-- **~34× memory compression** visualization in the sidebar
+- **~34x memory compression** visualization in the sidebar
 
 ---
 
@@ -47,7 +47,7 @@ Real-time 3D semantic map viewer and training curves for the PC2D LiDAR mapping 
 | Component | File | Description |
 |-----------|------|-------------|
 | `MapScene` | `src/components/MapScene.tsx` | Three.js 3D scene: instanced grid cells (`InstancedCells`), point clouds (`CloudLayer`), ego marker, range rings, ground plane, `FramePerf` telemetry |
-| `Timeline` | `src/components/Timeline.tsx` | Playback bar: play/pause, scrub/seek, speed selector (0.5×-5×), frame counter |
+| `Timeline` | `src/components/Timeline.tsx` | Playback bar: play/pause, scrub/seek, speed selector (0.5x-5x), frame counter |
 | `MetricsPanel` | `src/components/MetricsPanel.tsx` | Sidebar: stats grid, memory bars, view-mode selector, cell hover info, Training / Evaluation links |
 | `TrainingCurves` | `src/components/TrainingCurves.tsx` | Recharts: mIoU + val loss dual-axis chart, per-class IoU chart, metric cards |
 | `EvalPanel` | `src/components/EvalPanel.tsx` | Recharts: pixel/point mIoU, per-class IoU bars, distance-band mIoU, latency + memory |
@@ -82,7 +82,7 @@ flowchart TB
     WS_ENDPOINT -->|/metrics/history JSON| TRAINING
 ```
 
-### Message types (server → client)
+### Message types (server -> client)
 
 | Type | Format | When |
 |------|--------|------|
@@ -93,7 +93,7 @@ flowchart TB
 | `stats` | JSON | Every 2 frames - FPS, latency, memory |
 | `control_ack` | JSON | Response to pause/play/seek/speed commands |
 
-### Control messages (client → server)
+### Control messages (client -> server)
 
 ```json
 {"type": "control", "action": "pause"}
@@ -175,13 +175,39 @@ uv run python -m uvicorn src.server.app:create_app --factory --host 127.0.0.1 --
 npm run dev
 ```
 
-### Production build
+### Production build (static export)
+
+The dashboard is a fully client-side app (`output: "export"` in `next.config.ts`), so `npm run build` emits static HTML/JS/CSS into `out/`. There is no Next.js server, `npm start` previews the exported `out/` folder locally.
 
 ```bash
 cd dashboard
-npm run build
-npm start
+npm run build   # emits static site to out/
+npm start       # local preview of out/ (requires the backend on port 8000)
 ```
+
+---
+
+## Deploying to Cloudflare Pages
+
+The `out/` static export can be hosted on any static host. For Cloudflare Pages:
+
+| Setting | Value |
+|---------|-------|
+| Root directory | `dashboard` |
+| Build command | `npm run build` |
+| Build output directory | `out` |
+| Node version | Pinned via `dashboard/.node-version` (22) |
+
+Environment variables (set for **Production and Preview** in the Pages dashboard; `dashboard/.gitignore` excludes `.env*`, so they can't be committed):
+
+| Variable | Example | Notes |
+|----------|---------|-------|
+| `NEXT_PUBLIC_PC2D_API` | `https://api.example.com` | Must be `https://` (Pages is HTTPS; `http://` gets blocked as mixed content) |
+| `NEXT_PUBLIC_PC2D_WS` | `wss://api.example.com/ws/map` | Must be `wss://` |
+
+`NEXT_PUBLIC_*` vars are inlined **at build time**, so changing the backend URL requires a new Pages build (redeploy).
+
+The backend must allow CORS from the Pages origin: `*.pages.dev` deployments (production and preview) are always allowed via regex in `src/server/app.py`; add any custom domain to the backend's `PC2D_CORS_ORIGINS` env var (comma-separated).
 
 ---
 
@@ -192,7 +218,7 @@ npm start
 | `NEXT_PUBLIC_PC2D_WS` | `ws://localhost:8000/ws/map` | WebSocket URL for the map stream |
 | `NEXT_PUBLIC_PC2D_API` | `http://localhost:8000` | HTTP API base URL (for training history) |
 
-Set these in `dashboard/.env.local` if the backend runs on a different host/port.
+Set these in `dashboard/.env.local` if the backend runs on a different host/port. They are inlined at build time (`next build`), not read at runtime. See the Cloudflare Pages section above for hosted deployments.
 
 ---
 
@@ -200,7 +226,7 @@ Set these in `dashboard/.env.local` if the backend runs on a different host/port
 
 | Technology | Version | Purpose |
 |------------|---------|---------|
-| [Next.js](https://nextjs.org/) | 16.3 | App Router, SSR, bundling |
+| [Next.js](https://nextjs.org/) | 16.3 | App Router, static export, bundling |
 | [React](https://react.dev/) | 19.2 | UI framework |
 | [Three.js](https://threejs.org/) | 0.185 | 3D rendering engine |
 | [@react-three/fiber](https://docs.pmnd.rs/react-three-fiber) | 9.7 | React renderer for Three.js |
@@ -215,7 +241,7 @@ Set these in `dashboard/.env.local` if the backend runs on a different host/port
 
 | Mode | Key | Renders | Use case |
 |------|-----|---------|----------|
-| Grid 2.5D | `grid` | Instanced boxes colored by class × occupancy | Overview of the full semantic map |
+| Grid 2.5D | `grid` | Instanced boxes colored by class x occupancy | Overview of the full semantic map |
 | Seg cloud | `seg` | Class-colored point cloud (Three.js Points) | Inspect per-point segmentation quality |
 | Raw cloud | `raw` | Height-gradient colored point cloud | Inspect raw geometry |
 | Compare | `compare` | Segmented + raw overlaid | Side-by-side segmentation quality |

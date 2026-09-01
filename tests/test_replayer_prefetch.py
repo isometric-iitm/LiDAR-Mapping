@@ -1,7 +1,7 @@
 """Tests for the replayer's bounded multi-frame prefetch buffer.
 
 The prefetch loads a window of upcoming frames into memory ahead of time but
-``get()`` must still pace delivery one frame at a time at the native cadence —
+``get()`` must still pace delivery one frame at a time at the native cadence:
 frames are never handed to the consumer early. The buffer size must stay bounded
 under a slow consumer, and seek/restart must invalidate stale buffered frames.
 """
@@ -55,7 +55,7 @@ class TestPrefetchBuffer:
     def test_natural_cadence_is_not_paced_ahead(self, synth_seq):
         """Frames must be delivered at the native cadence, not as fast as the
         buffer allows. At speed 1.0 / 20 Hz (~50ms period) consuming 5 frames
-        must take at least ~4 x 50ms — delivery is wall-clock paced."""
+        must take at least ~4 x 50ms; delivery is wall-clock paced."""
         rep = SemanticKITTIReplayer(synth_seq, playback_speed=1.0, loop=False, native_hz=20.0, prefetch_window=4)
         try:
             time.sleep(0.3)

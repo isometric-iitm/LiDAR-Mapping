@@ -1,17 +1,21 @@
 import os
 import time
+import warnings
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from src.data.projection import (
-    build_range_image,
-    build_range_image_gpu,
-    compute_projection,
-    project_points_gpu,
-)
+from src.data.projection import make_projector
 from src.models.unet import RangeImageUNet
+
+try:
+    from src.models import knn_triton
+except Exception:  # pragma: no cover - triton absent/non-CUDA machine
+    knn_triton = None
+
+# Suppress inductor SM warning on consumer GPUs; fallback is correct.
+warnings.filterwarnings("ignore", message="Not enough SMs", module="torch._inductor")
 
 
 class Segmenter:
@@ -33,16 +37,12 @@ class Segmenter:
         device: str | None = None,
         precision: str | None = None,
     ):
-        self.h = h
-        self.w = w
-        self.fov_top_deg = fov_top_deg
-        self.fov_bottom_deg = fov_bottom_deg
-        self.max_range = max_range
-        self.num_classes = num_classes
-
         from src.common.config import resolve_device, resolve_precision
         self.precision = resolve_precision(precision)
         self.device = torch.device(resolve_device(device))
+        self.h, self.w = h, w
+        self.projector = make_projector(
+            self.device, h, w, fov_top_deg, fov_bottom_deg, max_range)
 
         self.model = RangeImageUNet(
             in_channels=in_channels,
@@ -52,8 +52,7 @@ class Segmenter:
             groups=groups,
         )
         from src.common.config import resolve_path
-        # Env override (highest priority) lets a machine point the segmenter at
-        # its own checkpoint without touching config; falls back to the passed arg.
+        # Env override (highest priority) lets a machine point the segmenter at its own checkpoint without config.
         checkpoint = os.getenv("PC2D_CHECKPOINT", "") or checkpoint
         ckpt_path = resolve_path(checkpoint)
         ckpt = torch.load(str(ckpt_path), map_location=self.device, weights_only=False)
@@ -64,62 +63,91 @@ class Segmenter:
         if self.device.type == "cuda" and self.precision == "fp16":
             self.model.half()
 
-        # torch.compile: only on CUDA and torch >= 2.0.
-        if self.device.type == "cuda" and torch.__version__.split(".")[0] == "2":
-            self.model = torch.compile(self.model)
+        self._compile_failed = False
+
+        if self._should_compile(self.device):
+            plain = self.model
+            torch._dynamo.config.suppress_errors = True
+            # PC2D_COMPILE_MODE env var forces a specific compile mode; unset tries default then reduce-overhead.
+            env_mode = os.getenv("PC2D_COMPILE_MODE", "").strip().lower()
+            if env_mode and env_mode in ("default", "reduce-overhead"):
+                modes = [env_mode]
+            else:
+                modes = ["default", "reduce-overhead"]
+            for mode in modes:
+                for dynamic in (False, True):
+                    self.model = torch.compile(plain, mode=mode, dynamic=dynamic)
+                    if self._warmup(in_channels):
+                        print(f"[Segmenter] torch.compile mode={mode!r} dynamic={dynamic} OK")
+                        break
+                    print(f"[Segmenter] torch.compile mode={mode!r} dynamic={dynamic} warmup failed")
+                    self.model = plain
+                else:
+                    continue
+                break
+            else:
+                print("[Segmenter] torch.compile failed for all modes, falling back to eager")
+                self.model = plain
 
         print(f"[Segmenter] loaded {ckpt_path} (best_miou={ckpt.get('best_miou', 'n/a'):.4f}) on {self.device} precision={self.precision}")
 
-        # Lazy-allocated pinned host buffer for async (non_blocking) H2D copies,
-        # so the CPU thread never stalls submitting the point cloud to the GPU.
-        self._pin = None  # np.ndarray (n,4) float32, pinned via torch.zeros(..., pin_memory=True)
+    @staticmethod
+    def _should_compile(device: torch.device) -> bool:
+        """torch.compile is a CUDA-only win here; also requires torch >= 2.0."""
+        if device.type != "cuda":
+            return False
+        try:
+            major = int(torch.__version__.split(".")[0])
+            minor = int(torch.__version__.split(".")[1])
+        except (IndexError, ValueError):
+            return False
+        return (major, minor) >= (2, 0)
 
-    def _pin_buffer(self, n: int) -> np.ndarray:
-        """Return a pinned float32 (n,4) host buffer large enough for n points."""
-        if self._pin is None or self._pin.shape[0] < n:
-            self._pin = torch.zeros((n, 4), dtype=torch.float32, pin_memory=True).numpy()
-        return self._pin
+    def _warmup(self, in_channels: int) -> bool:
+        """One dummy forward so torch.compile finishes graph capture before the
+        live stream's first frame (otherwise frame 1 pays the whole compile
+        cost). Uses a realistic random input (not zeros) to exercise more
+        codepaths. Returns False if the forward raised (compile backout)."""
+        dtype = torch.half if (self.device.type == "cuda" and self.precision == "fp16") else torch.float32
+        dummy = torch.randn(1, in_channels, self.h, self.w, device=self.device, dtype=dtype)
+        try:
+            with torch.inference_mode():
+                with torch.amp.autocast("cuda", enabled=(self.device.type == "cuda" and self.precision == "fp16")):
+                    self.model(dummy)
+        except Exception as e:
+            print(f"[Segmenter] warmup exception: {type(e).__name__}: {e}")
+            return False
+        return True
 
     @torch.inference_mode()
     def segment(self, points: np.ndarray) -> tuple[np.ndarray, dict]:
         """Returns (per_point_class_ids [N] uint8 in [0,num_classes), timings dict).
 
-        Timings sub-fields (ms): project (H2D + projection + range image),
-        forward (UNet + softmax + knn gather), sync (argmax + device->host copy).
-        On CUDA the H2D copy is asynchronous (non_blocking) so submitting it does
-        not stall the CPU; the only blocking device sync is the final .cpu().
+        Timings sub-fields (ms): project (projection + range image via the device
+        Projector), forward (UNet + softmax + knn gather), sync (argmax + device->host
+        copy). On CUDA the H2D copy is asynchronous (non_blocking) so submitting it
+        does not stall the CPU; the only blocking device sync is the final .cpu().
         """
         t = {"project": 0.0, "forward": 0.0, "sync": 0.0, "total": 0.0}
         if points.shape[0] == 0 or points.shape[1] < 4:
             return np.zeros(0, dtype=np.uint8), {"project": 0.0, "forward": 0.0, "sync": 0.0, "total": 0.0}
 
         t0 = time.perf_counter()
-        if self.device.type == "cuda":
-            # Async H2D from a pinned buffer: submitting the copy does not block
-            # the CPU; only the final .cpu() below synchronizes with the GPU stream.
-            pin = self._pin_buffer(points.shape[0])
-            pin_view = pin[: points.shape[0]]
-            np.copyto(pin_view, points[:, :4])
-            pts = torch.from_numpy(pin_view).to(self.device, non_blocking=True)
-            row, col, r = project_points_gpu(pts, h=self.h, w=self.w,
-                                             fov_top_deg=self.fov_top_deg,
-                                             fov_bottom_deg=self.fov_bottom_deg)
-            ri = build_range_image_gpu(pts, row, col, r, h=self.h, w=self.w,
-                                       max_range=self.max_range)
-            proj_t = torch.stack((row, col), dim=1).unsqueeze(0)
-        else:
-            proj, ranges = compute_projection(points, h=self.h, w=self.w,
-                                              fov_top_deg=self.fov_top_deg,
-                                              fov_bottom_deg=self.fov_bottom_deg)
-            ri = build_range_image(points, proj, points[:, 3], ranges, h=self.h, w=self.w,
-                                   max_range=self.max_range)
-            ri = torch.from_numpy(np.ascontiguousarray(ri))
-            proj_t = torch.from_numpy(proj).long().unsqueeze(0)
+        ri, proj_t = self.projector.project(points)
         t1 = time.perf_counter()
         t["project"] = (t1 - t0) * 1000.0
 
         with torch.amp.autocast("cuda", enabled=(self.device.type == "cuda" and self.precision == "fp16")):
-            logits = self.model(ri.unsqueeze(0))
+            try:
+                logits = self.model(ri.unsqueeze(0))
+            except Exception as e:
+                if not self._compile_failed and hasattr(self.model, "_orig_mod"):
+                    print(f"[Segmenter] compiled model runtime error ({type(e).__name__}: {e}), falling back to eager")
+                    self.model = self.model._orig_mod
+                    self._compile_failed = True
+                    logits = self.model(ri.unsqueeze(0))
+                else:
+                    raise
             probs = torch.softmax(logits.float(), dim=1)
             # 3x3 neighbour gather -> per-point probabilities (knn_project_back)
             point_probs = self._knn_probs(probs, proj_t, 3)
@@ -135,10 +163,26 @@ class Segmenter:
 
     @staticmethod
     def _knn_probs(pixel_probs: torch.Tensor, proj: torch.Tensor, k: int = 3) -> torch.Tensor:
-        """Mean of the (k,k) neighbour probabilities per point — single gather,
-        batch free (segment() feeds batch 1)."""
+        """Mean of the (k,k) neighbour probabilities per point.
+
+        On CUDA float32 with k == 3 the work is delegated to a single fused
+        Triton pass (no index materialization); everything else uses the torch
+        gather-mean below. Bit-compatible within float tolerance (same 9
+        neighbours, same mean)."""
         _, c, h, w = pixel_probs.shape
         n = proj.shape[1]
+        if (
+            k == 3
+            and knn_triton is not None
+            and getattr(knn_triton, "_TRITON_OK", False)
+            and proj.device.type == "cuda"
+            and pixel_probs.dtype == torch.float32
+            and pixel_probs.is_contiguous()
+        ):
+            try:
+                return knn_triton.triton_knn3(pixel_probs, proj, n)
+            except Exception as e:
+                print(f"[Segmenter] triton_knn3 failed ({type(e).__name__}: {e}), falling back to torch")
         pp = pixel_probs.permute(0, 2, 3, 1).reshape(-1, c)  # (h*w, c) contiguous
         half = k // 2
         off = torch.arange(-half, half + 1, device=proj.device, dtype=torch.long)
@@ -147,7 +191,7 @@ class Segmenter:
         rinds = (rows[:, :, None] + off[None, None, :]).clamp(0, h - 1).reshape(n, -1)
         cinds = (cols[:, :, None] + off[None, None, :]).clamp(0, w - 1).reshape(n, -1)
         flat = rinds * w + cinds  # (n, k*k)
-        gathered = pp[flat]       # (n, k*k, c) — one big gather, no per-offset allocs
+        gathered = pp[flat]       # (n, k*k, c); one big gather, no per-offset allocs
         return gathered.mean(dim=1)
 
 

@@ -135,6 +135,20 @@ class TestProjectionEdgeCases:
         assert ri.shape == (5, 64, 2048)
         assert ri.any()
 
+    def test_jit_projection_matches_numpy(self):
+        from src.data import projection
+        rng = np.random.default_rng(3)
+        n = 3000
+        pts = np.zeros((n, 4), dtype=np.float32)
+        pts[:, 0] = rng.uniform(-60, 60, n)
+        pts[:, 1] = rng.uniform(-60, 60, n)
+        pts[:, 2] = rng.uniform(-3, 5, n)
+        pts[:, 3] = 1.0
+        p_jit, r_jit = compute_projection(pts, h=64, w=2048)
+        p_np, r_np = projection._compute_projection_numpy(pts, 64, 2048, 2.0, -24.8)
+        np.testing.assert_array_equal(p_jit, p_np)
+        np.testing.assert_allclose(r_jit, r_np, atol=1e-5)
+
     def test_range_image_values(self):
         h, w, max_range = 64, 2048, 80.0
         pts = np.array([[5.0, 0.0, 1.0, 0.7]], dtype=np.float32)

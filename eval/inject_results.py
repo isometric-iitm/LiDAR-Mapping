@@ -78,7 +78,9 @@ def format_results(data):
     lines.append("|--------|-------|")
     lines.append(f"| Peak RSS | {mem.get('peak_rss_mb', 0):.1f} MB |")
     if mem.get("gpu_peak_mb") is not None:
-        lines.append(f"| GPU Peak | {mem['gpu_peak_mb']:.1f} MB |")
+        lines.append(f"| GPU Allocated | {mem['gpu_peak_mb']:.1f} MB |")
+    if mem.get("gpu_reserved_mb") is not None:
+        lines.append(f"| GPU Reserved | {mem['gpu_reserved_mb']:.1f} MB |")
     lines.append("")
     return "\n".join(lines)
 
@@ -98,7 +100,7 @@ def inject(readme_path, results_dir):
     readme_text = readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
 
     if MARKER_START in readme_text and MARKER_END in readme_text:
-        print(f"Markers already present in {readme_path} — skipping (hand-curated Results section).")
+        print(f"Markers already present in {readme_path}; skipping (hand-curated Results section).")
         print(f"  Reference: {json_path.name}")
         return
 

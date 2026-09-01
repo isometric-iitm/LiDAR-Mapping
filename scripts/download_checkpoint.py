@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Download the trained checkpoint (best_miou.pt) from a GitHub Release asset.
 
-The model is shipped as a Release asset (not committed, not Git LFS — see
+The model is shipped as a Release asset (not committed, not Git LFS, see
 checkpoints/README.md). Judges fetch it with:
 
     uv run python scripts/download_checkpoint.py
@@ -15,8 +15,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
-# Default Release asset URL for isometric-iitm/LiDAR-Mapping, tag v1.0.0.
-# Change _TAG/_REPO here (or pass --url) when a newer checkpoint is published.
+# Default Release asset URL for isometric-iitm/LiDAR-Mapping, tag v1.0.0. Change _TAG/_REPO or pass --url for newer.
 _REPO = "isometric-iitm/LiDAR-Mapping"
 _TAG = "v1.0.0"
 DEFAULT_URL = f"https://github.com/{_REPO}/releases/download/{_TAG}/best_miou.pt"

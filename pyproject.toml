@@ -20,6 +20,7 @@ dependencies = [
   "triton-windows>=3.8,<3.9; sys_platform == 'win32'",
   "uvicorn[standard]>=0.52.4",
   "webdataset>=1.0.2",
+  "psutil>=7.2.2",
 ]
 
 [tool.uv.sources]

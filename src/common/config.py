@@ -5,19 +5,107 @@ Precedence (highest wins):
     2. value from the committed config YAML
     3. absolute paths are used as-is; relative paths resolve against the pc2d/
        repo root (the folder three levels above this package), NOT the process
-       CWD — so commands can be run from any directory.
+       CWD, so commands can be run from any directory.
 
 Committed config YAMLs carry relative defaults. Local .env holds machine-specific
 absolute paths (e.g. F:/sih/...). See .env.example for the full contract.
 """
 import os
 import warnings
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
 
 _CONFIG_CACHE: dict[str, dict] = {}
+
+
+@dataclass(frozen=True)
+class GridParams:
+    """Ring/sector geometry for the log-polar grid (config/grid.yaml -> grid:)."""
+    r_min: float = 0.5
+    r_max: float = 100.0
+    dr_0: float = 0.05
+    r_transition: float = 10.0
+    alpha: float = 1.004994
+    n_theta: int = 720
+    z_min: float = -5.0
+    z_max: float = 10.0
+    n_classes: int = 4
+    occupancy_gain: float = 1.0
+    occ_threshold: float = 0.2
+
+    @classmethod
+    def from_dict(cls, g: dict) -> "GridParams":
+        return cls(
+            r_min=g["r_min"],
+            r_max=g["r_max"],
+            dr_0=g["dr_0"],
+            r_transition=g.get("r_transition", g["r_max"]),
+            alpha=g["alpha"],
+            n_theta=int(g["n_theta"]),
+            z_min=g["z_min"],
+            z_max=g["z_max"],
+            n_classes=int(g["n_classes"]),
+            occupancy_gain=g.get("occupancy_gain", 1.0),
+            occ_threshold=g.get("occ_threshold", 0.2),
+        )
+
+
+@dataclass(frozen=True)
+class TraversabilityParams:
+    """Drivability scoring weights/thresholds (config/grid.yaml -> traversability:)."""
+    enabled: bool = True
+    weights: tuple = (0.25, 0.25, 0.35, 0.15)
+    z_diff_thresh: float = 0.5
+    slope_thresh: float = 0.4
+    class_scores: tuple = (1.0, 0.6, 0.2, 0.1)
+
+    @classmethod
+    def from_dict(cls, t: dict) -> "TraversabilityParams":
+        return cls(
+            enabled=t.get("enabled", True),
+            weights=tuple(t.get("weights", (0.25, 0.25, 0.35, 0.15))),
+            z_diff_thresh=t.get("z_diff_thresh", 0.5),
+            slope_thresh=t.get("slope_thresh", 0.4),
+            class_scores=tuple(t.get("class_scores", (1.0, 0.6, 0.2, 0.1))),
+        )
+
+
+@dataclass(frozen=True)
+class MemoryParams:
+    """Uniform-grid equivalence used for the compression report (config/grid.yaml -> memory:)."""
+    uniform_cell_guess: float = 200.0
+    uniform_cell_size: float = 0.05
+
+    @classmethod
+    def from_dict(cls, m: dict) -> "MemoryParams":
+        return cls(
+            uniform_cell_guess=m.get("uniform_cell_guess", 200.0),
+            uniform_cell_size=m.get("uniform_cell_size", 0.05),
+        )
+
+
+@dataclass(frozen=True)
+class GridConfig:
+    """Typed view of config/grid.yaml (grid/traversability/memory sections)."""
+    grid: GridParams = field(default_factory=GridParams)
+    traversability: TraversabilityParams = field(default_factory=TraversabilityParams)
+    memory: MemoryParams = field(default_factory=MemoryParams)
+
+    @classmethod
+    def from_dict(cls, cfg: dict) -> "GridConfig":
+        return cls(
+            grid=GridParams.from_dict(cfg["grid"]),
+            traversability=TraversabilityParams.from_dict(cfg.get("traversability", {})),
+            memory=MemoryParams.from_dict(cfg.get("memory", {})),
+        )
+
+
+def as_grid_config(cfg: dict | GridConfig) -> GridConfig:
+    """Accept a raw grid.yaml dict or an already-typed GridConfig."""
+    return cfg if isinstance(cfg, GridConfig) else GridConfig.from_dict(cfg)
 
 
 def repo_root() -> Path:
@@ -38,8 +126,7 @@ def resolve_path(value: str | Path) -> Path:
     return repo_root() / p
 
 
-# env var -> list of dotted config paths it can override. Both ckpt dirs map to
-# the same var because pipeline.yaml and train_range_image.yaml name it differently.
+# env var -> list of dotted config paths it can override (both ckpt dirs map to the same var).
 _ENV_TARGETS: dict[str, list[list[str]]] = {
     "PC2D_SEQ_DIR": [["source", "seq_dir"]],
     "PC2D_CHECKPOINT": [["model", "checkpoint"]],
@@ -49,10 +136,10 @@ _ENV_TARGETS: dict[str, list[list[str]]] = {
     "PC2D_DEVICE": [["model", "device"]],
     "PC2D_PRECISION": [["model", "precision"]],
     "PC2D_PLAYBACK_SPEED": [["source", "playback_speed"]],
+    "PC2D_CORS_ORIGINS": [["dashboard", "cors_origins"]],
 }
 
-# Which sections each env var can touch, used to restrict overrides to the YAML
-# actually loaded (pipeline vs train). Mapping env -> top-level section names.
+# Which sections each env var can touch, restricts overrides to the loaded YAML (pipeline vs train).
 _ENV_SECTIONS: dict[str, set[str]] = {
     "PC2D_SEQ_DIR": {"source"},
     "PC2D_CHECKPOINT": {"model"},
@@ -62,6 +149,7 @@ _ENV_SECTIONS: dict[str, set[str]] = {
     "PC2D_DEVICE": {"model"},
     "PC2D_PRECISION": {"model"},
     "PC2D_PLAYBACK_SPEED": {"source"},
+    "PC2D_CORS_ORIGINS": {"dashboard"},
 }
 
 # env var -> cast applied to the string value before it overrides the YAML.
@@ -89,7 +177,7 @@ def apply_env_overrides(cfg: dict, sections: set[str] | None = None) -> dict:
     ``sections`` (optional) restricts which env vars apply based on the top-level
     config sections they target (e.g. ``{"server","checkpoint"}`` for the training
     YAML). If None, every registered env var that targets an existing section is
-    applied — safe because each target is guarded by ``_safe_set``.
+    applied, safe because each target is guarded by ``_safe_set``.
     """
     _load_env()
     for env, targets in _ENV_TARGETS.items():

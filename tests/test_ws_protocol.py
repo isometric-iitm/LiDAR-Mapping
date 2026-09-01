@@ -21,7 +21,7 @@ class TestBinarySnapshotHeader:
         pts[:, 3] = 1.0
         labels = rng.integers(0, 4, n, dtype=np.uint8)
         grid.update(pts, labels)
-        snap = grid.snapshot()
+        snap = grid.compute_snapshot(); grid.commit_snapshot()
         frames = list(ws_protocol.iter_snapshot_frames(
             snap["frame"], epoch=0, rows6=snap["rows"], cls=snap["cls"],
             chunk=ws_protocol.CHUNK_CELLS, yaw_cd=0,
@@ -32,7 +32,7 @@ class TestBinarySnapshotHeader:
         magic, code, version = struct.unpack_from("<IHH", buf, 0)
         assert magic == 0x50433244
         assert code == 1
-        assert version == 2
+        assert version == 3
 
     def test_header_frame_and_counts(self):
         grid = LogPolarGrid(load_grid_config())
@@ -47,7 +47,7 @@ class TestBinarySnapshotHeader:
         pts[:, 3] = 1.0
         labels = rng.integers(0, 4, n, dtype=np.uint8)
         grid.update(pts, labels)
-        snap = grid.snapshot()
+        snap = grid.compute_snapshot(); grid.commit_snapshot()
         k = snap["rows"].shape[0]
         frames = list(ws_protocol.iter_snapshot_frames(
             snap["frame"], epoch=7, rows6=snap["rows"], cls=snap["cls"],
@@ -80,14 +80,14 @@ class TestBinaryDeltaHeader:
         pts[:, 3] = 1.0
         labels = rng.integers(0, 4, n, dtype=np.uint8)
         grid.update(pts, labels)
-        grid.snapshot()
+        grid.compute_snapshot(); grid.commit_snapshot()
 
         other_pts = pts.copy()
         other_pts[:, 0] += 50.0
         for _ in range(15):
             grid.update(other_pts, labels)
 
-        delta = grid.delta()
+        delta = grid.compute_delta()
         frames = list(ws_protocol.iter_delta_frames(
             delta["frame"], epoch=3, rows6=delta["rows"], cls=delta["cls"],
             freed=delta["freed"], chunk=ws_protocol.CHUNK_CELLS, yaw_cd=0,
@@ -102,7 +102,7 @@ class TestBinaryDeltaHeader:
 
 
 class TestBinaryRowLayout:
-    def test_row_record_32_bytes(self):
+    def test_row_record_28_bytes(self):
         grid = LogPolarGrid(load_grid_config())
         rng = np.random.default_rng(3)
         n = 20
@@ -115,7 +115,7 @@ class TestBinaryRowLayout:
         pts[:, 3] = 1.0
         labels = rng.integers(0, 4, n, dtype=np.uint8)
         grid.update(pts, labels)
-        snap = grid.snapshot()
+        snap = grid.compute_snapshot(); grid.commit_snapshot()
         k = snap["rows"].shape[0]
         if k == 0:
             pytest.skip("no rendered cells")
@@ -125,11 +125,11 @@ class TestBinaryRowLayout:
         ))
         buf = frames[0]
         body = buf[44:]
-        assert len(body) == k * 32
+        assert len(body) == k * 28
         floats = np.frombuffer(body, dtype="<f4")
-        first_row = floats[:7]
+        first_row = floats[:6]
         i_val, j_val = first_row[0], first_row[1]
-        trav_val = first_row[6]
+        trav_val = first_row[5]
         assert i_val >= 0
         assert j_val >= 0
         assert 0.0 <= trav_val <= 1.0

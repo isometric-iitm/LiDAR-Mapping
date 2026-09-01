@@ -1,4 +1,4 @@
-# Live streaming pipeline configuration (PROJECT_SPEC §10/§11)
+# Live streaming pipeline configuration (PROJECT_SPEC S.10/S.11)
 source:
   seq_dir: "data/sequences/08"   # relative to pc2d/; override with $PC2D_SEQ_DIR
   playback_speed: 1.0
@@ -25,4 +25,6 @@ server:
   wire_compress: true            # zlib-compress binary WS frames (reduces bytes, slight CPU cost)
 
 dashboard:
-  url: "http://localhost:3000"
+  # Comma-separated extra CORS origins for the API (custom dashboard domains);
+  # override with $PC2D_CORS_ORIGINS. *.pages.dev deployments are always allowed.
+  cors_origins: "http://localhost:3000,http://127.0.0.1:3000"

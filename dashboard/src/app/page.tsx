@@ -21,25 +21,16 @@ import {
   type CellInfo,
 } from "@/components/MapScene";
 import { useMapStream } from "@/lib/useMapStream";
+import { computeRingEdges } from "@/lib/gridGeometry";
 
 type CamMode = "persp" | "ortho" | "top";
 
-function computeGridEdges(meta: { r_min: number; dr_0: number; alpha: number; n_rings: number; phase1_rings?: number }): number[] {
-  const { r_min, dr_0, alpha, n_rings, phase1_rings = 0 } = meta;
-  const edges: number[] = [r_min];
-  let cum = 0;
-  for (let k = 0; k < n_rings; k++) {
-    cum += k < phase1_rings ? dr_0 : dr_0 * alpha ** (k - phase1_rings);
-    edges.push(r_min + cum);
-  }
-  return edges;
-}
-
-function DemandInvalidator({ patch, camMode }: { patch: unknown; camMode: string }) {
+function DemandInvalidator({ patch, camMode, travMode, opacity }: { patch: unknown; camMode: string; travMode: boolean; opacity: number }) {
   const invalidate = useThree((s) => s.invalidate);
-  useEffect(() => {
+  /* Layout-effect so a new patch/trav-mode/opacity frame is invalidated before the browser paints. */
+  useLayoutEffect(() => {
     invalidate();
-  }, [patch, camMode, invalidate]);
+  }, [patch, camMode, travMode, opacity, invalidate]);
   return null;
 }
 
@@ -87,15 +78,12 @@ function OrthoAutoFit({ maxR }: { maxR: number }) {
   useLayoutEffect(() => {
     const o = cam as THREE.OrthographicCamera;
     if (!o.isOrthographicCamera) return;
-    // Fit the full world diameter edge-to-edge to the viewport WIDTH.
-    // Subtract bottom overlay height (~70px) so the map doesn't tuck
-    // behind the timeline / mode label.
+    /* Fit full world diameter to viewport width, minus ~70px for bottom overlay. */
     const bottomMargin = 70;
     const worldDiameter = 2 * maxR;
     const zoomW = size.width / worldDiameter;
     const zoomH = (size.height - bottomMargin) / worldDiameter;
-    // Use whichever zoom is *larger* (shows more, so the map fits in both axes).
-    // Width-first for wide screens, height-first for tall.
+    /* Use whichever zoom is *larger* (map fits in both axes; width-first on wide, height-first on tall). */
     const zoom = Math.min(zoomW, zoomH);
     o.zoom = Math.max(0.5, zoom);
     o.updateProjectionMatrix();
@@ -110,7 +98,6 @@ function hoverInfo(cell: CellInfo, gridEdges: number[], nTheta: number): {
   zMax: number;
   zMean: number;
   occ: number;
-  dyn: number;
   trav: number;
   r: number;
   deg: number;
@@ -129,7 +116,6 @@ function hoverInfo(cell: CellInfo, gridEdges: number[], nTheta: number): {
     zMax: cell.zMax,
     zMean: cell.zMean,
     occ: cell.occ,
-    dyn: cell.dyn,
     trav: cell.trav,
     r,
     deg,
@@ -187,7 +173,7 @@ export default function Home() {
   }, []);
 
   const maxR = meta?.r_max ?? 100;
-  const gridEdges = useMemo(() => meta ? computeGridEdges(meta) : [], [meta?.r_min, meta?.dr_0, meta?.alpha, meta?.n_rings, meta?.phase1_rings]);
+  const gridEdges = useMemo(() => meta ? computeRingEdges(meta) : [], [meta]);
   const nTheta = meta?.n_theta ?? 720;
 
   const resetNorth = () => {
@@ -309,7 +295,7 @@ export default function Home() {
               maxZoom={12}
             />
             <PerfOverlay onStats={onClientPerf} />
-            <DemandInvalidator patch={patch} camMode={camMode} />
+            <DemandInvalidator patch={patch} camMode={camMode} travMode={viewMode === "trav"} opacity={gridOpacity} />
             {animTarget && (
               <CameraAnimator
                 target={animTarget}
@@ -390,7 +376,7 @@ export default function Home() {
             </span>
             {meta ? (
               <span className="hud-val ml-2">
-                {meta.n_rings} × {meta.n_theta}
+                {meta.n_rings} x {meta.n_theta}
               </span>
             ) : null}
             {showCloud && cloud ? (
@@ -398,7 +384,7 @@ export default function Home() {
             ) : null}
             {viewMode === "compare" && stats ? (
               <div className="hud-cap mt-1 text-cyan-400/90">
-                {stats.compression_ratio.toLocaleString()}× fewer cells than uniform 5 cm grid
+                {stats.compression_ratio.toLocaleString()}x fewer cells than uniform 5 cm grid
               </div>
             ) : null}
           </div>

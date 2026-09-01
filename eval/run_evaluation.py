@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Evaluation harness -- pixel-level and point-level mIoU with per-distance-band breakdown.
+"""Evaluation harness: pixel/point mIoU with per-distance-band breakdown.
 
-All paths and model parameters come from config YAML + env overrides.
 Outputs: results/eval_{timestamp}.json, confusion_matrices.png,
-         per_distance_band.png, per_class_iou.png, eval_summary.md
+per_distance_band.png, per_class_iou.png, eval_summary.md
 """
 
 import argparse
@@ -11,12 +10,17 @@ import json
 import os
 import sys
 import time
-import tracemalloc
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 import torch
+from dotenv import load_dotenv
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -34,6 +38,8 @@ from src.data.label_mapping import bin_5_to_4, remap_labels, load_class_mapping
 from src.models.unet import RangeImageUNet
 from src.models.predict import Segmenter
 
+load_dotenv(repo_root() / ".env", override=False)
+
 
 DISTANCE_BANDS = [(0, 5), (5, 10), (10, 20), (20, 40), (40, 80)]
 BAND_NAMES = [f"{lo}-{hi}m" for lo, hi in DISTANCE_BANDS]
@@ -45,13 +51,100 @@ def _safe_floats(iou_list):
 
 def _latency_stats(latencies):
     if not latencies:
-        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0}
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "median": 0.0, "p90": 0.0}
+    arr = np.array(latencies)
     return {
-        "mean": float(np.mean(latencies)),
-        "std": float(np.std(latencies)),
-        "min": float(np.min(latencies)),
-        "max": float(np.max(latencies)),
+        "mean": float(np.mean(arr)),
+        "std": float(np.std(arr)),
+        "min": float(np.min(arr)),
+        "max": float(np.max(arr)),
+        "median": float(np.median(arr)),
+        "p90": float(np.percentile(arr, 90)),
     }
+
+
+class _MemTracker:
+    """Tracks peak process RSS (MiB) using psutil when available, with a
+    tracemalloc fallback. Sampled explicitly (not on a timer) so the caller
+    controls overhead, typically once per batch/scan."""
+
+    def __init__(self):
+        self.peak_rss_mib = 0.0
+        if psutil is not None:
+            self._proc = psutil.Process()
+        else:
+            self._proc = None
+            import tracemalloc as _tm
+            _tm.start()
+            self._tm = _tm
+
+    def sample(self):
+        if self._proc is not None:
+            rss = self._proc.memory_info().rss / (1024 * 1024)
+            if rss > self.peak_rss_mib:
+                self.peak_rss_mib = rss
+        else:
+            _, peak = self._tm.get_traced_memory()
+            peak_mib = peak / (1024 * 1024)
+            if peak_mib > self.peak_rss_mib:
+                self.peak_rss_mib = peak_mib
+
+    def finish(self) -> dict:
+        self.sample()
+        if self._proc is None:
+            self._tm.stop()
+        return {"peak_rss_mb": round(self.peak_rss_mib, 1)}
+
+
+class _BandStats:
+    """Shared confusion + per-distance-band accumulator for the pixel- and
+    point-level eval paths so both produce byte-identical result shapes.
+    `preds/tgts` may be image-shaped (H,W) or flat point vectors;
+    `update_confusion` flattens and drops ignore_index (255) rows on its own."""
+
+    def __init__(self, num_classes: int):
+        self.cm_5 = np.zeros((num_classes, num_classes), dtype=np.int64)
+        self.cm_4 = np.zeros((4, 4), dtype=np.int64)
+        self.band_cms_5 = {b: np.zeros((num_classes, num_classes), dtype=np.int64) for b in DISTANCE_BANDS}
+        self.band_cms_4 = {b: np.zeros((4, 4), dtype=np.int64) for b in DISTANCE_BANDS}
+        self.latencies = []
+
+    def observe(self, preds_5, tgts_5, ranges=None, latency_ms=None):
+        update_confusion(self.cm_5, preds_5, tgts_5)
+        preds_4 = bin_5_to_4(preds_5)
+        tgts_4 = bin_5_to_4(tgts_5)
+        update_confusion(self.cm_4, preds_4, tgts_4)
+        if latency_ms is not None:
+            self.latencies.append(latency_ms)
+        if ranges is None:
+            return
+        for lo, hi in DISTANCE_BANDS:
+            mask = (ranges >= lo) & (ranges < hi)
+            if mask.any():
+                update_confusion(self.band_cms_5[(lo, hi)], preds_5[mask], tgts_5[mask])
+                update_confusion(self.band_cms_4[(lo, hi)], preds_4[mask], tgts_4[mask])
+
+    def result(self, count_key: str, count_value: int) -> dict:
+        miou_5, ci_5 = miou_from_confusion(self.cm_5)
+        miou_4, ci_4 = miou_from_confusion(self.cm_4)
+        band_5, band_4 = {}, {}
+        for (lo, hi), name in zip(DISTANCE_BANDS, BAND_NAMES):
+            m5, c5 = miou_from_confusion(self.band_cms_5[(lo, hi)])
+            m4, c4 = miou_from_confusion(self.band_cms_4[(lo, hi)])
+            band_5[name] = {"miou": m5, "class_ious": dict(zip(CLASS_NAMES_5, _safe_floats(c5)))}
+            band_4[name] = {"miou": m4, "class_ious": dict(zip(CLASS_NAMES_4, _safe_floats(c4)))}
+        return {
+            count_key: count_value,
+            "miou_5class": miou_5,
+            "miou_4class": miou_4,
+            "class_ious_5": dict(zip(CLASS_NAMES_5, _safe_floats(ci_5))),
+            "class_ious_4": dict(zip(CLASS_NAMES_4, _safe_floats(ci_4))),
+            "per_distance_band_5class": band_5,
+            "per_distance_band_4class": band_4,
+            "confusion_5class": self.cm_5.tolist(),
+            "confusion_4class": self.cm_4.tolist(),
+            "latency_ms": _latency_stats(self.latencies),
+        }
 
 
 def _resolve_checkpoint(cfg):
@@ -82,17 +175,29 @@ def _resolve_seq_dir(cfg, cli_override=None):
     return None
 
 
-def evaluate_pixel_level(model, val_loader, device, num_classes, use_amp, max_range, limit=None):
+def evaluate_pixel_level(model, val_loader, device, num_classes, use_amp, max_range, limit=None, mem=None):
     model.eval()
-    cm_5 = np.zeros((num_classes, num_classes), dtype=np.int64)
-    cm_4 = np.zeros((4, 4), dtype=np.int64)
-    latencies = []
+    acc = _BandStats(num_classes)
     n_samples = 0
 
-    band_cms_5 = {b: np.zeros((num_classes, num_classes), dtype=np.int64) for b in DISTANCE_BANDS}
-    band_cms_4 = {b: np.zeros((4, 4), dtype=np.int64) for b in DISTANCE_BANDS}
-
     with torch.inference_mode():
+        # Warmup: 2 forward passes before timing (CUDA init, cuDNN autotune, torch.compile).
+        warmup_batch = None
+        for batch_idx, batch in enumerate(val_loader):
+            ri_batch, li_batch = batch
+            ri_gpu = ri_batch.to(device, non_blocking=True)
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                model(ri_gpu)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                model(ri_gpu)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            warmup_batch = batch
+            break
+
+        # Re-iterate from the start (including the warmup batch for mIoU).
         for batch_idx, batch in enumerate(val_loader):
             if limit is not None and batch_idx >= limit:
                 break
@@ -106,55 +211,26 @@ def evaluate_pixel_level(model, val_loader, device, num_classes, use_amp, max_ra
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             t1 = time.perf_counter()
-            latencies.append((t1 - t0) * 1000.0)
+            latency_ms = (t1 - t0) * 1000.0
 
             preds_5 = logits.argmax(dim=1).cpu().numpy()
             tgts_5 = li_batch.numpy()
-            preds_4 = bin_5_to_4(preds_5)
-            tgts_4 = bin_5_to_4(tgts_5)
-
             ri_np = ri_batch.numpy()
             for b in range(preds_5.shape[0]):
-                update_confusion(cm_5, preds_5[b], tgts_5[b])
-                update_confusion(cm_4, preds_4[b], tgts_4[b])
-
                 ranges = ri_np[b, 0] * max_range
-                for lo, hi in DISTANCE_BANDS:
-                    mask = (ranges >= lo) & (ranges < hi)
-                    if mask.any():
-                        update_confusion(band_cms_5[(lo, hi)], preds_5[b][mask], tgts_5[b][mask])
-                        update_confusion(band_cms_4[(lo, hi)], preds_4[b][mask], tgts_4[b][mask])
+                acc.observe(preds_5[b], tgts_5[b], ranges=ranges, latency_ms=latency_ms)
 
             n_samples += preds_5.shape[0]
+            if mem is not None:
+                mem.sample()
             if (batch_idx + 1) % 20 == 0:
                 print(f"  pixel: {n_samples} samples ({batch_idx + 1} batches)")
 
-    miou_5, ci_5 = miou_from_confusion(cm_5)
-    miou_4, ci_4 = miou_from_confusion(cm_4)
-
-    band_5, band_4 = {}, {}
-    for (lo, hi), name in zip(DISTANCE_BANDS, BAND_NAMES):
-        m5, c5 = miou_from_confusion(band_cms_5[(lo, hi)])
-        m4, c4 = miou_from_confusion(band_cms_4[(lo, hi)])
-        band_5[name] = {"miou": m5, "class_ious": dict(zip(CLASS_NAMES_5, _safe_floats(c5)))}
-        band_4[name] = {"miou": m4, "class_ious": dict(zip(CLASS_NAMES_4, _safe_floats(c4)))}
-
-    return {
-        "n_samples": n_samples,
-        "miou_5class": miou_5,
-        "miou_4class": miou_4,
-        "class_ious_5": dict(zip(CLASS_NAMES_5, _safe_floats(ci_5))),
-        "class_ious_4": dict(zip(CLASS_NAMES_4, _safe_floats(ci_4))),
-        "per_distance_band_5class": band_5,
-        "per_distance_band_4class": band_4,
-        "confusion_5class": cm_5.tolist(),
-        "confusion_4class": cm_4.tolist(),
-        "latency_ms": _latency_stats(latencies),
-    }
+    return acc.result("n_samples", n_samples)
 
 
 def evaluate_point_level(seq_dir, checkpoint, model_cfg, train_cfg,
-                         device_str, precision, num_classes, limit=None):
+                         device_str, precision, num_classes, limit=None, mem=None):
     seq_path = Path(resolve_path(seq_dir)) if not isinstance(seq_dir, Path) else seq_dir
     velodyne_dir = seq_path / "velodyne"
     labels_dir = seq_path / "labels"
@@ -187,19 +263,16 @@ def evaluate_point_level(seq_dir, checkpoint, model_cfg, train_cfg,
         precision=precision,
     )
 
-    warmup_pts = np.random.randn(100, 4).astype(np.float32)
+    # Warmup with ~120k-point scan so CUDA kernels compile before timing.
+    warmup_pts = np.random.randn(120_000, 4).astype(np.float32)
     warmup_pts[:, 3] = 0.5
+    segmenter.segment(warmup_pts)
     segmenter.segment(warmup_pts)
 
     eval_files = bin_files[:limit] if limit else bin_files
 
-    cm_5 = np.zeros((num_classes, num_classes), dtype=np.int64)
-    cm_4 = np.zeros((4, 4), dtype=np.int64)
-    latencies = []
+    acc = _BandStats(num_classes)
     n_scans = 0
-
-    band_cms_5 = {b: np.zeros((num_classes, num_classes), dtype=np.int64) for b in DISTANCE_BANDS}
-    band_cms_4 = {b: np.zeros((4, 4), dtype=np.int64) for b in DISTANCE_BANDS}
 
     for bf in eval_files:
         points = np.fromfile(str(bf), dtype=np.float32).reshape(-1, 4)
@@ -216,43 +289,18 @@ def evaluate_point_level(seq_dir, checkpoint, model_cfg, train_cfg,
 
         valid = gt_5 != 255
         if valid.any():
-            update_confusion(cm_5, pred_5[valid], gt_5[valid])
-            update_confusion(cm_4, bin_5_to_4(pred_5[valid]), gt_4[valid])
-
             ranges = np.sqrt(np.sum(points[:, :3] ** 2, axis=1))
-            for lo, hi in DISTANCE_BANDS:
-                rmask = valid & (ranges >= lo) & (ranges < hi)
-                if rmask.any():
-                    update_confusion(band_cms_5[(lo, hi)], pred_5[rmask], gt_5[rmask])
-                    update_confusion(band_cms_4[(lo, hi)], bin_5_to_4(pred_5[rmask]), gt_4[rmask])
+            acc.observe(pred_5[valid], gt_5[valid], ranges=ranges[valid], latency_ms=timings["total"])
+        else:
+            acc.latencies.append(timings["total"])
 
-        latencies.append(timings["total"])
         n_scans += 1
+        if mem is not None:
+            mem.sample()
         if n_scans % 50 == 0:
             print(f"  point: {n_scans}/{len(eval_files)} scans")
 
-    miou_5, ci_5 = miou_from_confusion(cm_5)
-    miou_4, ci_4 = miou_from_confusion(cm_4)
-
-    band_5, band_4 = {}, {}
-    for (lo, hi), name in zip(DISTANCE_BANDS, BAND_NAMES):
-        m5, c5 = miou_from_confusion(band_cms_5[(lo, hi)])
-        m4, c4 = miou_from_confusion(band_cms_4[(lo, hi)])
-        band_5[name] = {"miou": m5, "class_ious": dict(zip(CLASS_NAMES_5, _safe_floats(c5)))}
-        band_4[name] = {"miou": m4, "class_ious": dict(zip(CLASS_NAMES_4, _safe_floats(c4)))}
-
-    return {
-        "n_scans": n_scans,
-        "miou_5class": miou_5,
-        "miou_4class": miou_4,
-        "class_ious_5": dict(zip(CLASS_NAMES_5, _safe_floats(ci_5))),
-        "class_ious_4": dict(zip(CLASS_NAMES_4, _safe_floats(ci_4))),
-        "per_distance_band_5class": band_5,
-        "per_distance_band_4class": band_4,
-        "confusion_5class": cm_5.tolist(),
-        "confusion_4class": cm_4.tolist(),
-        "latency_ms": _latency_stats(latencies),
-    }
+    return acc.result("n_scans", n_scans)
 
 
 def plot_confusion_matrices(cm_5, cm_4, output_dir):
@@ -402,7 +450,7 @@ def generate_summary(results, output_dir):
         for bn, data in pixel["per_distance_band_4class"].items():
             lines.append(f"| {bn} | {data['miou']:.4f} |")
         lines.append("")
-        lines.append(f"### Latency: {pixel['latency_ms']['mean']:.1f} +/- {pixel['latency_ms']['std']:.1f} ms/batch")
+        lines.append(f"### Latency: {pixel['latency_ms']['median']:.1f} ms/batch (mean {pixel['latency_ms']['mean']:.1f} +/- {pixel['latency_ms']['std']:.1f}, p90 {pixel['latency_ms']['p90']:.1f})")
         lines.append("")
 
     point = results.get("point")
@@ -428,7 +476,7 @@ def generate_summary(results, output_dir):
         for bn, data in point["per_distance_band_4class"].items():
             lines.append(f"| {bn} | {data['miou']:.4f} |")
         lines.append("")
-        lines.append(f"### Latency: {point['latency_ms']['mean']:.1f} +/- {point['latency_ms']['std']:.1f} ms/scan")
+        lines.append(f"### Latency: {point['latency_ms']['median']:.1f} ms/scan (mean {point['latency_ms']['mean']:.1f} +/- {point['latency_ms']['std']:.1f}, p90 {point['latency_ms']['p90']:.1f})")
         lines.append("")
     else:
         lines.append("## Point-Level: Skipped (no raw data)")
@@ -439,7 +487,9 @@ def generate_summary(results, output_dir):
     lines.append("")
     lines.append(f"- **Peak RSS**: {mem.get('peak_rss_mb', 0):.1f} MB")
     if mem.get("gpu_peak_mb") is not None:
-        lines.append(f"- **GPU Peak**: {mem['gpu_peak_mb']:.1f} MB")
+        lines.append(f"- **GPU Allocated**: {mem['gpu_peak_mb']:.1f} MB")
+    if mem.get("gpu_reserved_mb") is not None:
+        lines.append(f"- **GPU Reserved**: {mem['gpu_reserved_mb']:.1f} MB")
     lines.append("")
 
     (output_dir / "eval_summary.md").write_text("\n".join(lines), encoding="utf-8")
@@ -489,7 +539,9 @@ def main():
         "memory": {},
     }
 
-    tracemalloc.start()
+    mem = _MemTracker()
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     if not args.point_only:
         print("\n--- Pixel-Level Evaluation ---")
@@ -508,6 +560,9 @@ def main():
 
             val_loader = create_val_loader(str(processed_root), batch_size=1, num_workers=0)
 
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
+
             model = RangeImageUNet(
                 in_channels=model_cfg.get("in_channels", 5),
                 num_classes=num_classes,
@@ -522,12 +577,12 @@ def main():
                 model.half()
 
             pixel_results = evaluate_pixel_level(
-                model, val_loader, device, num_classes, use_amp, max_range, args.limit)
+                model, val_loader, device, num_classes, use_amp, max_range, args.limit, mem=mem)
             results["pixel"] = pixel_results
 
             print(f"  mIoU 5-class: {pixel_results['miou_5class']:.4f}")
             print(f"  mIoU 4-class: {pixel_results['miou_4class']:.4f}")
-            print(f"  Latency: {pixel_results['latency_ms']['mean']:.1f} +/- {pixel_results['latency_ms']['std']:.1f} ms/batch")
+            print(f"  Latency: {pixel_results['latency_ms']['median']:.1f} ms/batch (mean {pixel_results['latency_ms']['mean']:.1f} +/- {pixel_results['latency_ms']['std']:.1f}, p90 {pixel_results['latency_ms']['p90']:.1f})")
 
             del model, ckpt_data
             if device.type == "cuda":
@@ -553,19 +608,24 @@ def main():
                     precision=precision,
                     num_classes=num_classes,
                     limit=args.limit,
+                    mem=mem,
                 )
                 if point_results is not None:
                     results["point"] = point_results
                     print(f"  mIoU 5-class: {point_results['miou_5class']:.4f}")
                     print(f"  mIoU 4-class: {point_results['miou_4class']:.4f}")
-                    print(f"  Latency: {point_results['latency_ms']['mean']:.1f} +/- {point_results['latency_ms']['std']:.1f} ms/scan")
+                    print(f"  Latency: {point_results['latency_ms']['median']:.1f} ms/scan (mean {point_results['latency_ms']['mean']:.1f} +/- {point_results['latency_ms']['std']:.1f}, p90 {point_results['latency_ms']['p90']:.1f})")
 
-    current, peak = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
-    results["memory"]["peak_rss_mb"] = peak / 1e6
-    results["memory"]["gpu_peak_mb"] = (
-        torch.cuda.max_memory_allocated(device) / 1e6 if device.type == "cuda" else None
-    )
+    mem_results = mem.finish()
+    results["memory"]["peak_rss_mb"] = mem_results["peak_rss_mb"]
+    if device.type == "cuda":
+        alloc_mib = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
+        reserved_mib = torch.cuda.max_memory_reserved(device) / (1024 * 1024)
+        results["memory"]["gpu_peak_mb"] = round(alloc_mib, 1)
+        results["memory"]["gpu_reserved_mb"] = round(reserved_mib, 1)
+    else:
+        results["memory"]["gpu_peak_mb"] = None
+        results["memory"]["gpu_reserved_mb"] = None
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     json_path = output_dir / f"eval_{ts}.json"

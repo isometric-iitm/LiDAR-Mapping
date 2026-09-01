@@ -105,7 +105,7 @@ export default function MetricsPanel({
   lastFrame,
   viewMode,
   onViewMode,
-  // pointSize/onPointSize kept for page compat but slider removed per spec
+  /* pointSize/onPointSize kept for page compat but slider removed per spec */
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   pointSize: _pointSize,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -121,11 +121,10 @@ export default function MetricsPanel({
   onViewMode: (v: ViewMode) => void;
   pointSize: number;
   onPointSize: (s: number) => void;
-  hover: { cls: string; clsColor: string; zMax: number; zMean: number; occ: number; dyn: number; trav: number; r: number; deg: number; cellWidth: string } | null;
+  hover: { cls: string; clsColor: string; zMax: number; zMean: number; occ: number; trav: number; r: number; deg: number; cellWidth: string } | null;
 }) {
 
-  // Log-scale memory bar widths so a ~KB grid stays proportionally visible
-  // against a ~MB uniform grid without the layout skewing to one extreme.
+  /* Log-scale memory bar widths so ~KB grid stays visible against ~MB uniform grid without layout skew. */
   const kb = stats?.grid_mem_kb ?? 0; // rendered live grid size (KB)
   const mb = stats?.uniform_equiv_mb ?? 0; // uniform 5cm grid size (MB, decimal)
   const gridW = kb > 0
@@ -219,7 +218,7 @@ export default function MetricsPanel({
               <span className="text-sm text-zinc-400">Compression</span>
               <span className="hud-big">
                 <AnimatedCounter target={stats?.compression_ratio ?? 0} />
-                <span className="hud-label ml-1">× fewer cells</span>
+                <span className="hud-label ml-1">x fewer cells</span>
               </span>
             </div>
           </div>
@@ -274,14 +273,13 @@ export default function MetricsPanel({
             />
             <span className="text-sm font-medium text-zinc-100">{hover ? hover.cls : "-"}</span>
             <span className="hud-val ml-2">
-              {hover ? `${hover.r.toFixed(1)} m / ${hover.deg.toFixed(1)}°` : "-"}
+              {hover ? `${hover.r.toFixed(1)} m / ${hover.deg.toFixed(1)}deg` : "-"}
             </span>
           </div>
           <CellStat k="H max" v={hover ? `${hover.zMax.toFixed(2)}m` : "-"} />
           <CellStat k="Mean z" v={hover ? `${hover.zMean.toFixed(2)}m` : "-"} />
           <CellStat k="Width" v={hover ? hover.cellWidth : "-"} />
           <CellStat k="Occ" v={hover ? `${(hover.occ * 100).toFixed(0)}%` : "-"} />
-          <CellStat k="Dyn" v={hover ? `${(hover.dyn * 100).toFixed(0)}%` : "-"} />
           <CellStat k="Trav" v={hover ? `${(hover.trav * 100).toFixed(0)}%` : "-"} />
         </div>
       </div>

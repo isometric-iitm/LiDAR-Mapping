@@ -1,6 +1,6 @@
 # Evaluation Summary
 
-- **Timestamp**: 2026-08-31T15:45:16.585816+00:00
+- **Timestamp**: 2026-09-01T16:52:50.819736+00:00
 - **Device**: cuda | **Precision**: fp16
 
 ## Pixel-Level
@@ -28,36 +28,37 @@
 | 20-40m | 0.6864 |
 | 40-80m | 0.5573 |
 
-### Latency: 10.1 +/- 69.9 ms/batch
+### Latency: 7.8 ms/batch (mean 8.3 +/- 3.2, p90 10.3)
 
 ## Point-Level
 
 - **Scans**: 4071
-- **mIoU (5-class)**: 0.6326
-- **mIoU (4-class)**: 0.7577
+- **mIoU (5-class)**: 0.6331
+- **mIoU (4-class)**: 0.7584
 
 ### Per-Class IoU (4-class)
 
 | Class | IoU |
 |-------|-----|
-| drivable | 0.8113 |
-| terrain_nondrivable | 0.8242 |
-| static_obstacle | 0.6565 |
-| dynamic_object | 0.7389 |
+| drivable | 0.8117 |
+| terrain_nondrivable | 0.8252 |
+| static_obstacle | 0.6582 |
+| dynamic_object | 0.7384 |
 
 ### Per-Distance-Band mIoU (4-class)
 
 | Band | mIoU |
 |------|------|
-| 0-5m | 0.7467 |
-| 5-10m | 0.7766 |
-| 10-20m | 0.7465 |
-| 20-40m | 0.6282 |
-| 40-80m | 0.5035 |
+| 0-5m | 0.7462 |
+| 5-10m | 0.7773 |
+| 10-20m | 0.7474 |
+| 20-40m | 0.6297 |
+| 40-80m | 0.5033 |
 
-### Latency: 54.0 +/- 14.9 ms/scan
+### Latency: 59.6 ms/scan (mean 58.6 +/- 9.0, p90 63.6)
 
 ## Memory
 
-- **Peak RSS**: 5876.8 MB
-- **GPU Peak**: 323.5 MB
+- **Peak RSS**: 6838.2 MB
+- **GPU Allocated**: 307.3 MB
+- **GPU Reserved**: 328.0 MB
