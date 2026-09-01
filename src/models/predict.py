@@ -1,5 +1,6 @@
 import os
 import time
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,11 @@ try:
     from src.models import knn_triton
 except Exception:  # pragma: no cover - triton absent/non-CUDA machine
     knn_triton = None
+
+# Suppress the inductor "Not enough SMs to use max_autotune_gemm mode" warning
+# on consumer GPUs (e.g. 3060 Ti ~38 SMs vs 80 threshold). The fallback to
+# regular GEMM tuning is correct; the warning is just noise.
+warnings.filterwarnings("ignore", message="Not enough SMs", module="torch._inductor")
 
 
 class Segmenter:
@@ -65,7 +71,16 @@ class Segmenter:
         if self._should_compile(self.device):
             plain = self.model
             torch._dynamo.config.suppress_errors = True
-            for mode in ("default", "reduce-overhead"):
+            # PC2D_COMPILE_MODE lets you A/B test a specific mode (e.g.
+            # "reduce-overhead" or "default") without touching code. When set,
+            # only that mode is tried (with dynamic=False then True); when
+            # unset the automatic order is default → reduce-overhead.
+            env_mode = os.getenv("PC2D_COMPILE_MODE", "").strip().lower()
+            if env_mode and env_mode in ("default", "reduce-overhead"):
+                modes = [env_mode]
+            else:
+                modes = ["default", "reduce-overhead"]
+            for mode in modes:
                 for dynamic in (False, True):
                     self.model = torch.compile(plain, mode=mode, dynamic=dynamic)
                     if self._warmup(in_channels):

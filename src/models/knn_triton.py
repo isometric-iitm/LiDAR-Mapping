@@ -25,8 +25,8 @@ try:
     import torch as _torch
 
     if _torch.cuda.is_available():
-        _a = _torch.zeros(1, device="cuda", dtype=torch.float32)
-        _b = _torch.zeros(1, device="cuda", dtype=torch.float32)
+        _a = _torch.zeros(1, device="cuda", dtype=_torch.float32)
+        _b = _torch.zeros(1, device="cuda", dtype=_torch.float32)
 
         @triton.jit
         def _probe_kernel(x_ptr, y_ptr, N, BLOCK: tl.constexpr):
@@ -38,7 +38,9 @@ try:
 
         _probe_kernel[(1,)](_a, _b, 1, BLOCK=1)
         _torch.cuda.synchronize()
-        del _a, _b
+        del _a, _b, _probe_kernel
+    else:
+        _TRITON_OK = False
 except Exception as _e:
     _TRITON_OK = False
     logger.warning("triton probe kernel failed (%s: %s), disabling Triton KNN path", type(_e).__name__, _e)
