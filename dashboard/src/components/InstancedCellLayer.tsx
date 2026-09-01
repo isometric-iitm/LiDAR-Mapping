@@ -287,7 +287,7 @@ function InstancedCells({
     };
 
     // Add any cell that is in the authoritative map but has no renderer slot
-    // (the inverse of freeStale) — heals rows lost across a dropped frame that
+    // (the inverse of freeStale); heals rows lost across a dropped frame that
     // the server or a missed chunk couldn't deliver. Bounded per call so a
     // poisoned map can never stall a frame indefinitely.
     const healMissing = (caps: number): number => {
@@ -306,7 +306,7 @@ function InstancedCells({
     // relative to the live count, so mesh.count (the GPU instance buffer width)
     // tracks the live scene instead of the historic high-water mark that would
     // otherwise climb toward MAX_INSTANCES and never come back down. Rebuilds
-    // `slotOf` so live cells occupy the lowest contiguous slots. O(live) —
+    // `slotOf` so live cells occupy the lowest contiguous slots. O(live);
     // only run periodically (on snapshots) to bound cost.
     const compactSlots = (): boolean => {
       if (c.free.length < 256 || c.free.length < c.slotOf.size) return false;

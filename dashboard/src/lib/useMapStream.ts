@@ -53,7 +53,7 @@ function pairFrom(flatKeys: number[], nTheta: number): [number, number][] {
 }
 
 /** Purge entries from `map` whose keys don't appear in `keep`. Bounded so a
- *  poisoned map never stalls a frame — only the first `cap` stale keys are
+ *  poisoned map never stalls a frame; only the first `cap` stale keys are
  *  removed per call. Returns the number purged. */
 function purgeStale(map: Map<number, unknown>, keep: Set<number>, cap: number): number {
   let n = 0;
@@ -285,7 +285,7 @@ export function useMapStream(): UseMapStream {
 
         if (msg.type === "delta") {
           // Frame-ordering guard: drop any decoded frame that is stale (arrived
-          // out of order from the async decoder pipeline — its frame is ≤ the
+          // out of order from the async decoder pipeline; its frame is ≤ the
           // last one we successfully applied).
           if (msg.frame <= lastAppliedFrame.current) return;
 

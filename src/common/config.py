@@ -5,7 +5,7 @@ Precedence (highest wins):
     2. value from the committed config YAML
     3. absolute paths are used as-is; relative paths resolve against the pc2d/
        repo root (the folder three levels above this package), NOT the process
-       CWD — so commands can be run from any directory.
+       CWD, so commands can be run from any directory.
 
 Committed config YAMLs carry relative defaults. Local .env holds machine-specific
 absolute paths (e.g. F:/sih/...). See .env.example for the full contract.
@@ -177,7 +177,7 @@ def apply_env_overrides(cfg: dict, sections: set[str] | None = None) -> dict:
     ``sections`` (optional) restricts which env vars apply based on the top-level
     config sections they target (e.g. ``{"server","checkpoint"}`` for the training
     YAML). If None, every registered env var that targets an existing section is
-    applied — safe because each target is guarded by ``_safe_set``.
+    applied, safe because each target is guarded by ``_safe_set``.
     """
     _load_env()
     for env, targets in _ENV_TARGETS.items():

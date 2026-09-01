@@ -55,7 +55,7 @@ class LogPolarGrid:
     ``commit_snapshot`` apply the sent-tracking mutation and must be called only
     after the outgoing frame was actually queued. A dropped frame therefore
     leaves state untouched and the next successful delta is recomputed from the
-    last *committed* state — no pending/retransmit bookkeeping is needed.
+    last *committed* state; no pending/retransmit bookkeeping is needed.
     """
 
     def __init__(self, cfg: dict | GridConfig | None = None):
@@ -80,7 +80,7 @@ class LogPolarGrid:
         self.uniform_side = m.uniform_cell_guess
         self.uniform_dx = m.uniform_cell_size
 
-        # derived ring geometry — two-phase
+        # derived ring geometry (two-phase)
         # Phase 1: uniform dr_0 rings from r_min to r_transition
         # Phase 2: geometric dr_0 * alpha^i from r_transition to r_max
         self.phase1_rings = round((self.r_transition - self.r_min) / self.dr_0)
@@ -112,7 +112,7 @@ class LogPolarGrid:
         # Phase 1: ring i width = dr_0 (uniform 5 cm within r_transition)
         # Phase 2: ring i width = dr_0 * alpha^(i - phase1_rings) (grows to ~50 cm at r_max)
 
-        # state (struct-of-arrays) — strictly per-frame (no temporal state at all)
+        # state (struct-of-arrays), strictly per-frame (no temporal state at all)
         self.z_mean = np.zeros(self.n_cells, dtype=np.float32)
         self._z_min_state = np.full(self.n_cells, np.inf, dtype=np.float32)
         self._z_max_state = np.full(self.n_cells, -np.inf, dtype=np.float32)
@@ -271,7 +271,7 @@ class LogPolarGrid:
         return n_hit
 
     def _apply_precise(self, uniq, zmin_c, zmax_c, zsum_c, seg_count, cls_counts, pre_rendered):
-        """Strictly per-frame state update — no history, no window, no DK.
+        """Strictly per-frame state update: no history, no window, no DK.
         Occupancy is binary this scan only; anything not hit this frame is free."""
         self.occupancy[uniq] = float(self.occ_gain)
         # instant free: any previously rendered cell not hit this scan goes free now
@@ -350,7 +350,7 @@ class LogPolarGrid:
         """Full snapshot of currently-rendered cells (no mutation).
 
         Returns {frame, rows: (k,6) float32 [i, j, z_mean, z_max, occ, trav],
-        cls: (k,) uint8, mask: (n_cells,) bool} — raw arrays, packed to binary
+        cls: (k,) uint8, mask: (n_cells,) bool}; raw arrays, packed to binary
         by the protocol layer. Call ``commit_snapshot`` once the frame is sent.
         """
         t0 = time.perf_counter()

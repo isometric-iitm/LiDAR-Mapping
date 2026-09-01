@@ -3,7 +3,7 @@
 
 This mirrors what src/server/app.py's ingest loop does each frame in precise
 mode: update the grid from a synthetic scan, compute_delta, (simulate) send it,
-commit_delta — plus a periodic snapshot every `--snapshot-interval` frames.
+commit_delta, plus a periodic snapshot every `--snapshot-interval` frames.
 Unlike bench_grid.py (which reports the grid-internal per-stage timings), this
 times the whole call sequence from the caller's perspective, wall-clock, which
 is what actually gates the live 30fps dashboard stream.

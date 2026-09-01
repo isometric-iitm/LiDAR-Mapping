@@ -1,7 +1,7 @@
 """Triton 3x3 KNN gather-mean for the segmenter's back-projection.
 
 The numpy/torch path builds a (n, 9) flat index tensor then does one big gather
-plus a mean — fine, but on CUDA it materializes n*9*8 bytes of indices plus the
+plus a mean, fine, but on CUDA it materializes n*9*8 bytes of indices plus the
 gathered tensor. This kernel fuses the clamp+shift+clamp, the gather, and the
 mean into one pass so no index materialization happens at all. It is a pure
 speed-up of ``Segmenter._knn_probs``: results are bit-compatible with the
@@ -87,7 +87,7 @@ def triton_knn3(pixel_probs: "torch.Tensor", proj: "torch.Tensor", n: int) -> "t
         proj: (1, 2, n) float32 point-to-pixel map on the same device.
         n: live point count (proj.shape[1]).
 
-    Returns (n, c) float32 — same numbers as the torch mean-of-9 fallback.
+    Returns (n, c) float32; same numbers as the torch mean-of-9 fallback.
 
     Raises RuntimeError if the module-level triton probe failed at import.
     """

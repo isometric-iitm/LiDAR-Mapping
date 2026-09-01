@@ -318,7 +318,7 @@ class Pipeline:
             try:
                 epoch, frame, cls5, seg_t, disk_ms = self._prefetch.get(timeout=0.5)
                 if epoch != self.epoch:
-                    # stale frame from before a seek/switch — discard
+                    # stale frame from before a seek/switch, discard
                     continue
                 cls4 = bin_5_to_4(cls5)
                 self._process_frame_seg(frame, cls4, seg_t, stats_iv, snap_iv, disk_ms=disk_ms)
@@ -342,7 +342,7 @@ class Pipeline:
             # snapshot or an incremental delta from the current grid state.
             # Sent-tracking is committed only after the frame is actually
             # queued, so a dropped frame is recomputed from the last committed
-            # state next iteration — no pending/retransmit bookkeeping needed.
+            # state next iteration; no pending/retransmit bookkeeping needed.
             if self._should_snapshot(snap_iv):
                 snap = self.grid.compute_snapshot()
                 is_snap = True

@@ -158,7 +158,7 @@ def train(cfg: dict, resume: str | None = None,
         weight_decay=cfg["train"]["weight_decay"],
     )
 
-    # GradScaler is only meaningful under fp16 AMP on CUDA — its use on CPU
+    # GradScaler is only meaningful under fp16 AMP on CUDA; its use on CPU
     # errors, so it is None there and all call sites are guarded.
     scaler = torch.amp.GradScaler("cuda") if use_amp else None
 

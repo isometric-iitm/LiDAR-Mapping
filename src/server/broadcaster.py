@@ -74,7 +74,7 @@ class Broadcaster:
         If the whole frame cannot fit, drop it as a unit (never deliver a
         truncated/partial frame) and drain queued binary frames to make room.
         Returns True if the frame was successfully sent, False if it was dropped
-        entirely — the caller may then preserve state (upsert/freed rows) for a
+        entirely; the caller may then preserve state (upsert/freed rows) for a
         later merge instead of silently losing them.
         """
         is_binary = kind != "text"

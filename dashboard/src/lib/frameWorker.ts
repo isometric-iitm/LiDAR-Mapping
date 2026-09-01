@@ -9,7 +9,7 @@
  *   worker -> main : { id, ok: true, msg } | { id, ok: false }
  *
  * `msg` is the same structural shape parseBinary() produced before (grid rows
- * as plain JS arrays etc.) — the main-thread hook just hands these to the same
+ * as plain JS arrays etc.); the main-thread hook just hands these to the same
  * reducer logic. Working in a worker means pako's inflate + the row-array
  * building never contends with React/R3F for the main thread.
  */

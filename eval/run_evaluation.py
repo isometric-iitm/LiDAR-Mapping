@@ -67,7 +67,7 @@ def _latency_stats(latencies):
 class _MemTracker:
     """Tracks peak process RSS (MiB) using psutil when available, with a
     tracemalloc fallback. Sampled explicitly (not on a timer) so the caller
-    controls overhead — typically once per batch/scan."""
+    controls overhead, typically once per batch/scan."""
 
     def __init__(self):
         self.peak_rss_mib = 0.0
@@ -269,7 +269,7 @@ def evaluate_point_level(seq_dir, checkpoint, model_cfg, train_cfg,
     # Warmup with a realistic-sized scan (~120k points) so the CUDA kernels
     # for the actual input shape are compiled before timing starts. The
     # segmenter's built-in warmup only exercises the UNet forward (fixed
-    # 1×5×64×2048 shape) — this exercises the full projection+segment
+    # 1x5x64x2048 shape); this exercises the full projection+segment
     # pipeline at live scan size.
     warmup_pts = np.random.randn(120_000, 4).astype(np.float32)
     warmup_pts[:, 3] = 0.5

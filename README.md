@@ -235,7 +235,7 @@ pc2d/
 
 ## Variable-Resolution Grid
 
-The core innovation: a **two-phase** ring geometry. Phase 1 keeps uniform **5 cm** rings from the sensor out to 10 m — exactly matching the PS requirement of "5cm cells within 10m radius". Phase 2 then grows each ring's width geometrically to **~50 cm** out to 100 m, achieving dramatic memory savings while preserving fine detail where it matters most — and the seam at 10 m is invisible (Phase 2's first ring is also 5 cm).
+The core innovation: a **two-phase** ring geometry. Phase 1 keeps uniform **5 cm** rings from the sensor out to 10 m, exactly matching the PS requirement of "5cm cells within 10m radius". Phase 2 then grows each ring's width geometrically to **~50 cm** out to 100 m, achieving dramatic memory savings while preserving fine detail where it matters most. The seam at 10 m is invisible (Phase 2's first ring is also 5 cm).
 
 ### Ring geometry
 
@@ -254,7 +254,7 @@ The core innovation: a **two-phase** ring geometry. Phase 1 keeps uniform **5 cm
 
 ### Per-frame occupancy (precise sensor mode only)
 
-The grid is strictly per-frame — occupancy is this scan's sensor truth, nothing
+The grid is strictly per-frame; occupancy is this scan's sensor truth, nothing
 more. There is no temporal decay/EMA: any cell not hit this scan goes free the
 instant it leaves the sensor view, so stale cells never linger (no ghosts on the
 dashboard).

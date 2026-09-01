@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Download the trained checkpoint (best_miou.pt) from a GitHub Release asset.
 
-The model is shipped as a Release asset (not committed, not Git LFS — see
+The model is shipped as a Release asset (not committed, not Git LFS, see
 checkpoints/README.md). Judges fetch it with:
 
     uv run python scripts/download_checkpoint.py

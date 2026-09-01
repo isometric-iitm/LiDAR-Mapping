@@ -7,13 +7,13 @@
 
 ## Why is `best_miou.pt` not committed?
 
-It is a **143 MB binary** — too large to track in plain git. Adding binary blobs of this size bloats the repository and slows every clone.
+It is a **143 MB binary**, too large to track in plain git. Adding binary blobs of this size bloats the repository and slows every clone.
 
 ## Delivery: GitHub Release (not Git LFS)
 
 Checkpoints are delivered as a **GitHub Release asset**, deliberately **not** via Git LFS.
 
-Rationale: models can grow well beyond 143 MB. Git LFS has free bandwidth quotas that larger models can exceed and adds a mandatory client-side dependency for every collaborator. A Release asset has no per-download quota at these sizes and requires no LFS setup — anyone can fetch it with a plain HTTPS request.
+Rationale: models can grow well beyond 143 MB. Git LFS has free bandwidth quotas that larger models can exceed and adds a mandatory client-side dependency for every collaborator. A Release asset has no per-download quota at these sizes and requires no LFS setup; anyone can fetch it with a plain HTTPS request.
 
 ### How judges get the model (one command)
 
@@ -44,4 +44,4 @@ When a better model is trained, publish it under the same flow (bump the tag):
    (The same works in the GitHub web UI under **Releases → Create a new release**.)
 3. Update the tag in `scripts/download_checkpoint.py` (`_TAG = "v1.1.0"`).
 
-> Do **not** run `git add checkpoints/best_miou.pt` — the `*.pt` rule in `.gitignore` keeps it out, and it should stay out. Only `history.jsonl` and this `README.md` are committed.
+> Do **not** run `git add checkpoints/best_miou.pt`; the `*.pt` rule in `.gitignore` keeps it out, and it should stay out. Only `history.jsonl` and this `README.md` are committed.

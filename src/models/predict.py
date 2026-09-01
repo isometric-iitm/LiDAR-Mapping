@@ -197,7 +197,7 @@ class Segmenter:
         rinds = (rows[:, :, None] + off[None, None, :]).clamp(0, h - 1).reshape(n, -1)
         cinds = (cols[:, :, None] + off[None, None, :]).clamp(0, w - 1).reshape(n, -1)
         flat = rinds * w + cinds  # (n, k*k)
-        gathered = pp[flat]       # (n, k*k, c) — one big gather, no per-offset allocs
+        gathered = pp[flat]       # (n, k*k, c); one big gather, no per-offset allocs
         return gathered.mean(dim=1)
 
 

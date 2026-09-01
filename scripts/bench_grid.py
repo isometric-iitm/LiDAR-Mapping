@@ -4,7 +4,7 @@
 Builds a fixed replay of ~N ego-centric Velodyne-like scans (120k points each),
 pre-generates them ONCE, then streams them through LogPolarGrid.update() in
 precise sensor-direct mode (the only mode) and measures the pure-delta
-compute/commit path — the live-inference hot path — to report ms/frame, FPS,
+compute/commit path (the live-inference hot path) to report ms/frame, FPS,
 and the per-stage breakdown the grid timestamps.
 
 Usage:
