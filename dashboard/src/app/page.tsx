@@ -27,8 +27,7 @@ type CamMode = "persp" | "ortho" | "top";
 
 function DemandInvalidator({ patch, camMode, travMode, opacity }: { patch: unknown; camMode: string; travMode: boolean; opacity: number }) {
   const invalidate = useThree((s) => s.invalidate);
-  // layout-effect so a new patch/trav-mode/opacity frame is invalidated before
-  // the browser paints (a passive effect could leave a stale frame on screen).
+  /* Layout-effect so a new patch/trav-mode/opacity frame is invalidated before the browser paints. */
   useLayoutEffect(() => {
     invalidate();
   }, [patch, camMode, travMode, opacity, invalidate]);
@@ -79,15 +78,12 @@ function OrthoAutoFit({ maxR }: { maxR: number }) {
   useLayoutEffect(() => {
     const o = cam as THREE.OrthographicCamera;
     if (!o.isOrthographicCamera) return;
-    // Fit the full world diameter edge-to-edge to the viewport WIDTH.
-    // Subtract bottom overlay height (~70px) so the map doesn't tuck
-    // behind the timeline / mode label.
+    /* Fit full world diameter to viewport width, minus ~70px for bottom overlay. */
     const bottomMargin = 70;
     const worldDiameter = 2 * maxR;
     const zoomW = size.width / worldDiameter;
     const zoomH = (size.height - bottomMargin) / worldDiameter;
-    // Use whichever zoom is *larger* (shows more, so the map fits in both axes).
-    // Width-first for wide screens, height-first for tall.
+    /* Use whichever zoom is *larger* (map fits in both axes; width-first on wide, height-first on tall). */
     const zoom = Math.min(zoomW, zoomH);
     o.zoom = Math.max(0.5, zoom);
     o.updateProjectionMatrix();
@@ -380,7 +376,7 @@ export default function Home() {
             </span>
             {meta ? (
               <span className="hud-val ml-2">
-                {meta.n_rings} × {meta.n_theta}
+                {meta.n_rings} x {meta.n_theta}
               </span>
             ) : null}
             {showCloud && cloud ? (
@@ -388,7 +384,7 @@ export default function Home() {
             ) : null}
             {viewMode === "compare" && stats ? (
               <div className="hud-cap mt-1 text-cyan-400/90">
-                {stats.compression_ratio.toLocaleString()}× fewer cells than uniform 5 cm grid
+                {stats.compression_ratio.toLocaleString()}x fewer cells than uniform 5 cm grid
               </div>
             ) : null}
           </div>

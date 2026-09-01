@@ -14,9 +14,7 @@ try:
 except Exception:  # pragma: no cover - triton absent/non-CUDA machine
     knn_triton = None
 
-# Suppress the inductor "Not enough SMs to use max_autotune_gemm mode" warning
-# on consumer GPUs (e.g. 3060 Ti ~38 SMs vs 80 threshold). The fallback to
-# regular GEMM tuning is correct; the warning is just noise.
+# Suppress inductor SM warning on consumer GPUs; fallback is correct.
 warnings.filterwarnings("ignore", message="Not enough SMs", module="torch._inductor")
 
 
@@ -54,8 +52,7 @@ class Segmenter:
             groups=groups,
         )
         from src.common.config import resolve_path
-        # Env override (highest priority) lets a machine point the segmenter at
-        # its own checkpoint without touching config; falls back to the passed arg.
+        # Env override (highest priority) lets a machine point the segmenter at its own checkpoint without config.
         checkpoint = os.getenv("PC2D_CHECKPOINT", "") or checkpoint
         ckpt_path = resolve_path(checkpoint)
         ckpt = torch.load(str(ckpt_path), map_location=self.device, weights_only=False)
@@ -71,10 +68,7 @@ class Segmenter:
         if self._should_compile(self.device):
             plain = self.model
             torch._dynamo.config.suppress_errors = True
-            # PC2D_COMPILE_MODE lets you A/B test a specific mode (e.g.
-            # "reduce-overhead" or "default") without touching code. When set,
-            # only that mode is tried (with dynamic=False then True); when
-            # unset the automatic order is default → reduce-overhead.
+            # PC2D_COMPILE_MODE env var forces a specific compile mode; unset tries default then reduce-overhead.
             env_mode = os.getenv("PC2D_COMPILE_MODE", "").strip().lower()
             if env_mode and env_mode in ("default", "reduce-overhead"):
                 modes = [env_mode]

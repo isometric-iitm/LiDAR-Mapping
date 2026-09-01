@@ -97,8 +97,7 @@ def reduce_segments(cells, z, cls, n_classes):
     n_uniq = _reduce_segments(cells, z, cls, uniq, zmin, zmax, zsum, n_cell, counts, n_classes)
     n_uniq = int(n_uniq)
 
-    # Kernel wrote strictly-increasing `uniq` in its filled prefix; return
-    # views limited to the valid prefix to match numpy semantics.
+    # Kernel wrote strictly-increasing `uniq` in its filled prefix; return views limited to valid prefix.
     return (
         uniq[:n_uniq].copy(),
         zmin[:n_uniq].copy(),
@@ -109,7 +108,7 @@ def reduce_segments(cells, z, cls, n_classes):
     )
 
 
-# ---- pure-numpy reference (used as fallback + in tests) ----
+# pure-numpy reference (used as fallback + in tests)
 def numpy_reduce_segments(cells, z, cls, n_classes):
     """Vectorized reference identical to the JIT kernel's output."""
     n = cells.shape[0]

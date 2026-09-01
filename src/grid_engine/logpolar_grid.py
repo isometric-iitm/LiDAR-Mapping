@@ -10,9 +10,7 @@ from src.grid_engine import jit_reduce
 
 UNKNOWN = 255
 
-# Optional numba acceleration for the per-cell scatter-reduce in update().
-# Defaults on; any runtime failure flips it off and the pure-numpy path is
-# used for the rest of the process, so a compile/link hiccup never breaks a run.
+# Optional numba acceleration for scatter-reduce; auto-falls back to numpy.
 _jit_enabled = jit_reduce._NUMBA_OK
 
 
@@ -34,15 +32,15 @@ def load_grid_cfg(path: str | Path | None = None) -> GridConfig:
 
 
 class LogPolarGrid:
-    """Variable-resolution 2.5D grid engine (PROJECT_SPEC §9).
+    """Variable-resolution 2.5D grid engine (PROJECT_SPEC S.9).
 
     Two-phase ring geometry (PS: "5cm within 10m, 50cm up to 100m"):
-      Phase 1 (r_min → r_transition): uniform dr_0 rings (alpha = 1.0).
-      Phase 2 (r_transition → r_max): geometric growth dr_0 · α^i.
+      Phase 1 (r_min -> r_transition): uniform dr_0 rings (alpha = 1.0).
+      Phase 2 (r_transition -> r_max): geometric growth dr_0 * alpha^i.
     Cells are (ring, sector) pairs; sectors are uniform across all rings.
 
-    Semantics are strictly per-frame (precise mode, PROJECT_SPEC §9.2 AP0):
-      - occupancy is binary this scan only (hit = occ_gain, else 0 → freed)
+    Semantics are strictly per-frame (precise mode, PROJECT_SPEC S.9.2 AP0):
+      - occupancy is binary this scan only (hit = occ_gain, else 0 -> freed)
       - class is the per-frame majority vote of this scan's points
       - z stats (mean, max) are this scan's points rebased onto the road
       - traversability is computed per-hit from height + majority class
@@ -80,9 +78,7 @@ class LogPolarGrid:
         self.uniform_side = m.uniform_cell_guess
         self.uniform_dx = m.uniform_cell_size
 
-        # derived ring geometry (two-phase)
-        # Phase 1: uniform dr_0 rings from r_min to r_transition
-        # Phase 2: geometric dr_0 * alpha^i from r_transition to r_max
+        # Two-phase ring geometry: uniform dr_0 then geometric dr_0 * alpha^i
         self.phase1_rings = round((self.r_transition - self.r_min) / self.dr_0)
         phase2_span = self.r_max - (self.r_min + self.phase1_rings * self.dr_0)
         if phase2_span > 0 and self.alpha > 1.0:
@@ -101,8 +97,7 @@ class LogPolarGrid:
         widths_p2 = None
         if self.phase2_rings > 0:
             widths_p2 = self.dr_0 * (self.alpha ** np.arange(self.phase2_rings))
-            # exact cover: clamp the final ring to land precisely on r_max
-            # (never near-zero; it stays close to the geometric width)
+            # Clamp final ring to land precisely on r_max (never near-zero; stays close to geometric width).
             covered = np.sum(widths_p2[:-1])
             widths_p2[-1] = phase2_span - covered
             self.ring_widths = np.concatenate([np.full(self.phase1_rings, self.dr_0), widths_p2])
@@ -131,15 +126,13 @@ class LogPolarGrid:
         self.trav_slope_thresh = tcfg.slope_thresh
         self.traversability = np.zeros(self.n_cells, dtype=np.float32)
 
-        # last-sent display values (change detection for incremental deltas).
-        # These are the ONLY fields mutated by commit_delta/commit_snapshot; a
-        # dropped frame leaves them untouched so the next delta re-derives
-        # everything relative to the last actually-sent state.
+        # Last-sent state for delta change detection. Only mutated by commit_*.
+        # Dropped frames leave these untouched so the next delta re-derives from
+        # the last committed state.
         self._prev_rendered = np.zeros(self.n_cells, dtype=bool)
         self._sent_zmax = np.zeros(self.n_cells, dtype=np.float32)
         self._sent_cls = np.full(self.n_cells, UNKNOWN, dtype=np.uint8)
-        # road elevation in the ego frame: heights are reported relative to it
-        # so the grid and the point cloud share a common "ground = 0" reference
+        # Road elevation in the ego frame; heights reported relative to it so grid and cloud share ground=0.
         self.ground_z = 0.0
 
         # per-frame timing breakdown (reset each update() call)
@@ -182,8 +175,7 @@ class LogPolarGrid:
         theta = np.arctan2(points[:, 1], points[:, 0])
         z = points[:, 2]
 
-        # per-frame road reference: low z within the near field is dominated by
-        # the road surface, so its 20th percentile tracks the local ground level
+        # Per-frame road reference: 20th percentile of near-field z tracks local ground level.
         near = (r > 1.5) & (r < 15.0) & (z > -8.0) & (z < 4.0)
         zn = z[near]
         if zn.size >= 128:
@@ -200,15 +192,11 @@ class LogPolarGrid:
         cells = i * self.n_theta + j
         t_polar = time.perf_counter()
 
-        # occupancy is this scan only: remember which cells were rendered before
-        # this scan so anything no longer hit is freed below.
+        # Occupancy is this scan only; remember pre-rendered cells so anything no longer hit is freed.
         pre_rendered = self.occupancy > self.occ_threshold
         t_occ = time.perf_counter()
 
-        # grouped scatter-reduce: one stable sort + vectorized min/max/sum.
-        # The per-cell reduce AND per-cell class tally are fused into a single
-        # numba pass (jit_reduce.reduce_segments) when available; the pure-numpy
-        # path below is the exact fallback, so results are bit-identical either way.
+        # Grouped scatter-reduce: fused numba when available; pure-numpy fallback is bit-identical.
         order = np.argsort(cells, kind="stable")
         csort = cells[order]
         zsort = zk[order].astype(np.float32)
@@ -243,8 +231,7 @@ class LogPolarGrid:
         self._apply_precise(uniq, zmin_c, zmax_c, zsum_c, seg_count, cls_counts_seg, pre_rendered)
         t_cls = time.perf_counter()
 
-        # clear height/class state for cells that left the rendered mask so the
-        # next hit starts fresh (prevents radial ghost terrain / stale tint).
+        # Clear height/class for cells that left the rendered mask so next hit starts fresh.
         post_rendered = self.occupancy > self.occ_threshold
         self._clear_freed(pre_rendered, post_rendered)
 
@@ -292,8 +279,7 @@ class LogPolarGrid:
         self.z_mean[uniq] = new_mean.astype(np.float32)
         self._z_min_state[uniq] = zmin_c.astype(np.float32)
         self._z_max_state[uniq] = zmax_c.astype(np.float32)
-        # trav: per-hit compute using absolute height above ground + class.
-        # Intra-cell z_diff is ~0 for single-point precise cells, so use height.
+        # Trav: per-hit from height above ground + class (intra-cell z_diff ~0 for precise cells, so use height).
         height_u = zmax_c.astype(np.float32) - float(self.ground_z)
         z_score_u = np.clip(1.0 - np.maximum(height_u, 0.0) / (self.trav_z_diff_thresh * 2.5), 0, 1)
         cls_u = self.dominant_class[uniq]
@@ -465,7 +451,7 @@ class LogPolarGrid:
         self.ground_z = 0.0
         self._prev_rendered[:] = False
 
-    # --- memory accountant (PROJECT_SPEC §9.2 / acceptance criterion) ---
+    # memory accountant (PROJECT_SPEC S.9.2 / acceptance criterion)
     @property
     def bytes_per_cell(self) -> float:
         return 2 * 4 + self.n_classes * 4 + 1 + 4 + 4 + 8

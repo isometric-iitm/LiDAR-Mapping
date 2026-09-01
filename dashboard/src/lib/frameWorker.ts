@@ -95,10 +95,8 @@ function parseBinary(buf: ArrayBuffer): ParsedMsg | null {
 self.onmessage = (ev: MessageEvent) => {
   const { id, buf } = ev.data as { id: number; buf: ArrayBuffer };
   try {
-    // The server sends raw-deflate-compressed binary (b'Z' + u32 uncompressed
-    // length + deflate payload) matching pako's inflateRaw. Decompress to a
-    // fresh ArrayBuffer, then parse. Fall back to the raw buffer when it is
-    // not actually compressed (plain path used by some tests/tools).
+    /* Server sends raw-deflate (b'Z' + u32 len + payload) matching pako inflateRaw.
+       Fall back to raw buffer if not compressed. */
     const u8 = new Uint8Array(buf);
     const inflated = decompressFrame(u8);
     const msg = parseBinary(inflated.buffer as ArrayBuffer);

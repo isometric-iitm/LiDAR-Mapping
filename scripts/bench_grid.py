@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Synthetic grid throughput benchmark (no GPU, no sensor data needed).
 
-Builds a fixed replay of ~N ego-centric Velodyne-like scans (120k points each),
-pre-generates them ONCE, then streams them through LogPolarGrid.update() in
-precise sensor-direct mode (the only mode) and measures the pure-delta
-compute/commit path (the live-inference hot path) to report ms/frame, FPS,
-and the per-stage breakdown the grid timestamps.
+Pre-generates ~N ego-centric scans (120k points each), streams through
+LogPolarGrid.update() in sensor-direct mode, and measures the pure-delta
+compute/commit path (ms/frame, FPS, per-stage breakdown).
 
 Usage:
     uv run python scripts/bench_grid.py [--frames 300] [--n-classes 4]

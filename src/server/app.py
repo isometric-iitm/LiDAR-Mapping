@@ -23,17 +23,12 @@ from src.server.metrics import FrameMetrics
 
 class Pipeline:
     """Two-stage streaming pipeline: SEG thread (GPU segmenter) runs ahead of the
-    GRID thread (CPU grid update + pack/emit), hiding the GPU's device→host sync
+    GRID thread (CPU grid update + pack/emit), hiding the GPU's device->host sync
     behind the previous frame's grid work. A single-slot mailbox preserves strict
     frame ordering with at most 1 frame of look-ahead.     Falls back to a serial
     single-thread path when ``pipeline.stages: single`` is set in config."""
 
-    # When at least this many frames drop consecutively, emit a full snapshot
-    # instead of a delta so the client resyncs cleanly. With pure deltas a drop
-    # is never lossy (the next delta is recomputed from the last *committed*
-    # state), so this threshold only bounds how far behind a slow dashboard can
-    # fall before we force a cheap authoritative snapshot. Tuned well above the
-    # normal snapshot interval so the periodic snapshot path is unaffected.
+    # Emit a snapshot after this many consecutive drops so the client resyncs.
     CATCHUP_DROP_THRESHOLD = 2
 
     def __init__(self, cfg: dict):
@@ -41,8 +36,7 @@ class Pipeline:
         self.cfg = cfg
         src = cfg["source"]
         mdl = cfg["model"]
-        # seq_dir and checkpoint may be relative to the repo root â€” resolve them
-        # so we don't depend on the process CWD.
+        # seq_dir and checkpoint may be relative to the repo root; resolve so we don't depend on CWD.
         seq_dir = resolve_path(src["seq_dir"])
         self.seq_base_dir = seq_dir.parent
         self.seq_id = seq_dir.name
@@ -59,19 +53,13 @@ class Pipeline:
         )
         self.grid = LogPolarGrid()
         self.grid_lock = threading.Lock()
-        # Small bounded queue: with pure deltas, dropping a frame is never lossy
-        # (the next delta is recomputed from the last *committed* state), so the
-        # queue only needs to absorb a short disk/I/O burst, not a long backlog.
-        # Backpressure trips the catchup snapshot quickly instead of letting the
-        # dashboard fall far behind a wall of stale intermediate frames.
+        # Small bounded queue; pure deltas make drops non-lossy, so it only
+        # absorbs short bursts. Backpressure trips catchup snapshot quickly.
         self.broadcaster = Broadcaster(
             maxsize=32, wire_compress=bool(self.cfg["server"].get("wire_compress", False))
         )
         self.pause_event = threading.Event()
-        # Consecutive frames dropped by the broadcast queue without a single
-        # successful send. When this grows large, a full snapshot is emitted so
-        # the client resyncs cleanly (a giant cumulative delta would cost more
-        # wire bytes than the snapshot it replaces).
+        # Consecutive queue drops; triggers catchup snapshot when large.
         self._consecutive_drops = 0
         # start paused: the dashboard must explicitly press Play (auto-play
         # off on page load). Seek previews still render one frame while paused.
@@ -87,14 +75,10 @@ class Pipeline:
         self._snap_iv = int(self.cfg["server"].get("snapshot_interval_frames", 5))
         self._stats_iv = int(self.cfg["server"].get("stats_interval_frames", 10))
 
-        # Two-stage pipelining: the GPU segmenter runs on its own thread ahead
-        # of the CPU grid/pack/emit stage, so the segmenter's device->host sync
-        # (.cpu()) overlaps the previous frame's grid work instead of stalling
-        # the single pipeline thread. `stages: auto` (default) enables it;
-        # `stages: single` restores the exact previous serial behavior.
+        # Two-stage pipeline: GPU segmenter thread overlaps device->host sync
+        # with the previous frame's grid work. `stages: auto` (default) or `single`.
         self._stages = str(self.cfg.get("pipeline", {}).get("stages", "auto")).lower()
-        # bounded look-ahead of segmented frames: maxsize 2 keeps at most ~1
-        # frame of lead so seek latency stays small and ordering is preserved.
+        # Bounded look-ahead (maxsize 2) keeps seek latency small.
         self._prefetch: queue.Queue = queue.Queue(maxsize=2)
         self._seg_thread = None
 
@@ -223,16 +207,10 @@ class Pipeline:
             self._preview = False
             return v
 
-    # ------------------------------------------------------------------
-    # Two-stage pipeline (stages: auto)
-    #
-    #   SEG thread: paced replayer read (disk) -> GPU segment -> mailbox
+    # Two-stage pipeline (stages: auto):
+    #   SEG thread: disk read -> GPU segment -> mailbox
     #   GRID thread: mailbox -> bin_5_to_4 -> grid.update -> pack -> emit
-    #
-    # The single-slot handoff guarantees strict frame ordering while letting the
-    # GPU segmenter run up to ~1 frame ahead, hiding its device->host .cpu()
-    # sync behind the CPU grid work of the previous frame.
-    # ------------------------------------------------------------------
+    # Single-slot handoff guarantees ordering; GPU segmenter runs ~1 frame ahead.
 
     def _single_loop(self):
         stats_iv = self.cfg["server"]["stats_interval_frames"]
@@ -271,16 +249,8 @@ class Pipeline:
             return
         self._single_render(frame, stats_iv, snap_iv, disk_ms=disk_ms)
 
-    # ------------------------------------------------------------------
-    # Two-stage pipeline (stages: auto)
-    #
-    #   SEG thread: paced replayer read (disk) -> GPU segment -> mailbox
-    #   GRID thread: mailbox -> bin_5_to_4 -> grid.update -> pack -> emit
-    #
-    # The single-slot handoff guarantees strict frame ordering while letting the
-    # GPU segmenter run up to ~1 frame ahead, hiding its device->host .cpu()
-    # sync behind the CPU grid work of the previous frame.
-    # ------------------------------------------------------------------
+    # Two-stage pipeline: SEG thread -> single-slot mailbox -> GRID thread.
+    # GPU segmenter runs ~1 frame ahead, overlapping device->host sync with grid work.
 
     def _seg_loop(self):
         while self.running:
@@ -302,8 +272,7 @@ class Pipeline:
                 if frame is None:
                     continue
                 cls5, seg_t = self.segmenter.segment(frame.points)
-                # Blocking put: if the grid thread is behind, we wait here (natural
-                # backpressure) rather than piling up stale frames.
+                # Blocking put: natural backpressure rather than piling up stale frames.
                 self._prefetch.put((epoch, frame, cls5, seg_t, disk_ms))
             except Exception as e:
                 import traceback
@@ -338,11 +307,7 @@ class Pipeline:
         with self.grid_lock:
             self.grid.update(frame.points, cls4)
             t_update = time.perf_counter()
-            # Pure extraction: compute (but do NOT commit) either a periodic
-            # snapshot or an incremental delta from the current grid state.
-            # Sent-tracking is committed only after the frame is actually
-            # queued, so a dropped frame is recomputed from the last committed
-            # state next iteration; no pending/retransmit bookkeeping needed.
+            # Compute without commit; commit only after successful queue put.
             if self._should_snapshot(snap_iv):
                 snap = self.grid.compute_snapshot()
                 is_snap = True
@@ -373,9 +338,7 @@ class Pipeline:
                 snap["frame"], self.epoch, snap["rows"], snap["cls"], freed, yaw_cd=yaw_cd))
         sent = self.broadcaster.emit_frame(frames, "binary")
         if sent:
-            # Commit sent-tracking only now that the frame is actually queued;
-            # the next delta is derived from this committed state, so nothing is
-            # ever lost or re-sent twice.
+            # Commit only on successful send; no lost or duplicated state.
             with self.grid_lock:
                 if is_snap:
                     self.grid.commit_snapshot()
@@ -398,8 +361,7 @@ class Pipeline:
         if self.cloud_on:
             tc = time.perf_counter()
             ego = self._accum_stream(frame.points, cls4, frame.idx)
-            # rebase onto the grid's road reference so the cloud ground sits on
-            # the grid floor instead of ~sensor-height below it
+            # Rebase onto grid's road reference so cloud ground sits on the grid floor, not ~sensor-height below.
             cxyz = np.round(ego[0], 2)
             cxyz[:, 2] -= float(self.grid.ground_z)
             for b in ws_protocol.iter_cloud_frames(self.grid.frame, self.epoch, cxyz, ego[1], yaw_cd=yaw_cd):
@@ -630,9 +592,16 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             pipeline.stop()
 
     app = FastAPI(title="pc2d live mapping", lifespan=lifespan)
+    cors_origins = [
+        origin.strip()
+        for origin in str(cfg.get("dashboard", {}).get("cors_origins", "")).split(",")
+        if origin.strip()
+    ]
+    # Allow any Cloudflare Pages deployment (production + preview); WS connections are not covered by CORS.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+        allow_origins=cors_origins,
+        allow_origin_regex=r"https://.*\.pages\.dev",
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -723,11 +692,7 @@ def create_app(cfg: dict | None = None) -> FastAPI:
                 if await _handle_control_message(pipeline, ws, data):
                     continue
                 if data.get("type") == "request_snapshot":
-                    # On-demand full snapshot: compute WITHOUT commit. This must
-                    # not mutate server sent-state (the pipeline's next delta is
-                    # still derived from its last *committed* frame), otherwise a
-                    # client-initiated snapshot would skip those cells for the
-                    # rest of the stream.
+                    # Compute snapshot WITHOUT commit; must not mutate sent-state.
                     with pipeline.grid_lock:
                         snap = pipeline.grid.compute_snapshot()
                     for b in ws_protocol.iter_snapshot_frames(

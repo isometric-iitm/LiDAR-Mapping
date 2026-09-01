@@ -78,12 +78,12 @@ Real-time semantic segmentation of LiDAR point clouds projected onto a **variabl
 
 </details>
 
-### Memory: ~34× compression
+### Memory: ~34x compression
 
 | Grid type | Cell size | Cell count | Memory |
 |-----------|-----------|------------|--------|
-| Uniform 5 cm | 0.05 m × 0.05 m | ~16 million | ~784 MB |
-| **Log-polar (ours)** | 5 cm → 50 cm | ~469K | **~22 MB** |
+| Uniform 5 cm | 0.05 m x 0.05 m | ~16 million | ~784 MB |
+| **Log-polar (ours)** | 5 cm -> 50 cm | ~469K | **~22 MB** |
 
 <!-- RESULTS_END -->
 
@@ -151,7 +151,7 @@ flowchart LR
     end
 
     subgraph Grid Engine
-        BIN4["5→4 class bin"]
+        BIN4["5->4 class bin"]
         LP["LogPolarGrid"]
         SNAP["Snapshot / Delta"]
     end
@@ -179,13 +179,13 @@ flowchart LR
 
 | Stage | What | GPU path | CPU path |
 |-------|------|----------|----------|
-| Projection | Points → (row, col, range) | `project_points_gpu` (all torch on-device) | `compute_projection` (numpy) |
-| Range image | Scatter into 5×64×2048 tensor | `build_range_image_gpu` (nearest-wins dedup) | `build_range_image` (far-wins overwrite) |
+| Projection | Points -> (row, col, range) | `project_points_gpu` (all torch on-device) | `compute_projection` (numpy) |
+| Range image | Scatter into 5x64x2048 tensor | `build_range_image_gpu` (nearest-wins dedup) | `build_range_image` (far-wins overwrite) |
 | Segmentation | UNet forward pass | fp16 autocast + `torch.compile` | fp32, no compile |
-| Back-projection | Pixel logits → per-point probs | `_knn_probs` (3×3 gather) | same (tensor ops) |
+| Back-projection | Pixel logits -> per-point probs | `_knn_probs` (3x3 gather) | same (tensor ops) |
 | Grid update | Per-cell reduce + class majority | numba JIT fused kernel (`jit_reduce`), fallback to numpy `reduceat`+`bincount` | same |
-| Pipeline | Thread orchestration | Two-stage (SEG thread → GRID thread), hides GPU `.cpu()` sync behind CPU grid work | `stages: single` fallback |
-| Streaming | Grid cells → binary frames | `ws_protocol` (44-byte header, 28-byte rows) | same |
+| Pipeline | Thread orchestration | Two-stage (SEG thread -> GRID thread), hides GPU `.cpu()` sync behind CPU grid work | `stages: single` fallback |
+| Streaming | Grid cells -> binary frames | `ws_protocol` (44-byte header, 28-byte rows) | same |
 
 ---
 
@@ -209,7 +209,7 @@ pc2d/
 │   ├── models/
 │   │   ├── unet.py           # RangeImageUNet (5-level encoder-decoder)
 │   │   ├── lovasz.py         # CombinedLoss (CE + Lovasz-Softmax)
-│   │   └── predict.py        # Segmenter (end-to-end: project → forward → KNN)
+│   │   └── predict.py        # Segmenter (end-to-end: project -> forward -> KNN)
 │   ├── grid_engine/
 │   │   ├── logpolar_grid.py  # LogPolarGrid (~469K cells, ~22 MB, two-phase, pure-delta, JIT-accelerated reduce)
 │   │   └── jit_reduce.py     # numba fused per-cell scatter-reduce (min/max/sum/count/class)
@@ -221,7 +221,7 @@ pc2d/
 │   └── inject_results.py     # auto-inject eval results into this README
 ├── scripts/
 │   ├── train.py              # train the UNet on precomputed shards
-│   ├── preprocess_to_shards.py  # raw .bin → tar shards (ri + li)
+│   ├── preprocess_to_shards.py  # raw .bin -> tar shards (ri + li)
 │   ├── download_checkpoint.py# fetch best_miou.pt from GitHub Release
 │   └── export_onnx.py        # export UNet to ONNX (opset 17)
 ├── tests/                    # 128 tests (see Testing section)
@@ -242,15 +242,15 @@ The core innovation: a **two-phase** ring geometry. Phase 1 keeps uniform **5 cm
 | Parameter | Value | Description |
 |-----------|-------|-------------|
 | `dr_0` | 0.05 m | Ring base width (5 cm) |
-| `r_transition` | 10.0 m | Phase 1 → Phase 2 boundary (uniform → geometric) |
+| `r_transition` | 10.0 m | Phase 1 -> Phase 2 boundary (uniform -> geometric) |
 | `alpha` | 1.005 | Phase 2 geometric growth factor per ring |
 | `r_min` | 0.5 m | Inner dead zone |
 | `r_max` | 100 m | Outer cutoff |
-| `n_theta` | 720 | Angular sectors (0.5° each) |
-| Phase 1 rings | 190 | Uniform 5 cm rings (0.5 → 10 m) |
-| Phase 2 rings | 462 | Geometric 5 cm → ~50 cm (10 → 100 m) |
+| `n_theta` | 720 | Angular sectors (0.5deg each) |
+| Phase 1 rings | 190 | Uniform 5 cm rings (0.5 -> 10 m) |
+| Phase 2 rings | 462 | Geometric 5 cm -> ~50 cm (10 -> 100 m) |
 | Resulting rings | ~652 | Phase 1 + Phase 2 |
-| Resulting cells | ~469K | rings × sectors |
+| Resulting cells | ~469K | rings x sectors |
 
 ### Per-frame occupancy (precise sensor mode only)
 
@@ -263,7 +263,7 @@ dashboard).
 |---------|-----------|-----------|
 | Occupancy on hit | binary hit = `occ_gain` for this scan's cells | `occupancy_gain = 1.0` |
 | Enter/leave render | `occ > occ_threshold` | `occ_threshold = 0.2` |
-| Freeing | anything not hit this scan → `occ = 0` immediately | - |
+| Freeing | anything not hit this scan -> `occ = 0` immediately | - |
 | Ground reference | 20th percentile of z in 1.5-15 m | auto-tracked per frame |
 
 ---
@@ -306,7 +306,7 @@ flowchart LR
     RX --> T255 --> E255
 ```
 
-Training uses 5-class with inverse-sqrt-frequency class weights. Grid display and evaluation use the binned 4-class scheme (merging vehicle + pedestrian → dynamic_object).
+Training uses 5-class with inverse-sqrt-frequency class weights. Grid display and evaluation use the binned 4-class scheme (merging vehicle + pedestrian -> dynamic_object).
 
 ---
 
@@ -332,6 +332,7 @@ CLI flag  >  PC2D_* env var  >  config YAML  >  default
 | `PC2D_PLAYBACK_SPEED` | `source.playback_speed` | float | Playback speed multiplier |
 | `PC2D_RAW_ROOT` | `data.raw_root` | path | Root of raw sequences |
 | `PC2D_PROCESSED_ROOT` | `data.processed_root` | path | Root of preprocessed shards |
+| `PC2D_CORS_ORIGINS` | `dashboard.cors_origins` | str (comma-sep) | Extra allowed CORS origins for the API (Cloudflare Pages `*.pages.dev` always allowed) |
 
 All optional. Unset vars fall back to relative defaults in YAML, resolved against the `pc2d/` repo root. Copy `.env.example` to `.env` for your machine.
 
@@ -384,7 +385,7 @@ Outputs written to `results/`:
 | Script | Purpose | Key args |
 |--------|---------|----------|
 | `scripts/train.py` | Train RangeImageUNet | `--config`, `--resume`, `--device`, `--precision`, `--processed-root` |
-| `scripts/preprocess_to_shards.py` | Raw .bin → tar shards | `--raw-root`, `--processed-root`, `--train-seqs`, `--val-seqs`, `--force` |
+| `scripts/preprocess_to_shards.py` | Raw .bin -> tar shards | `--raw-root`, `--processed-root`, `--train-seqs`, `--val-seqs`, `--force` |
 | `scripts/download_checkpoint.py` | Fetch best_miou.pt from Release | `--url`, `--out`, `--force` |
 | `scripts/export_onnx.py` | Export UNet to ONNX | `--checkpoint`, `--out`, `--opset 17` |
 | `eval/run_evaluation.py` | Full eval harness | `--device`, `--precision`, `--pixel-only`, `--point-only`, `--limit` |
@@ -394,7 +395,7 @@ Outputs written to `results/`:
 
 ## WebSocket Protocol
 
-Real-time data uses a compact binary framing protocol (40-100× smaller than JSON):
+Real-time data uses a compact binary framing protocol (40-100x smaller than JSON):
 
 ### Header (44 bytes)
 
@@ -415,9 +416,9 @@ Real-time data uses a compact binary framing protocol (40-100× smaller than JSO
 
 | Message | Layout |
 |---------|--------|
-| Snapshot | `n_a` × 28 bytes (i, j, z_mean, z_max, occ, dyn as float32 + cls as uint8 + 3 pad) |
-| Delta | same + `n_b` × 8 bytes (freed i, j as float32) |
-| Cloud | `n_a` × 12 bytes (x, y, z as float32) + `n_a` × uint8 (cls) |
+| Snapshot | `n_a` x 28 bytes (i, j, z_mean, z_max, occ, dyn as float32 + cls as uint8 + 3 pad) |
+| Delta | same + `n_b` x 8 bytes (freed i, j as float32) |
+| Cloud | `n_a` x 12 bytes (x, y, z as float32) + `n_a` x uint8 (cls) |
 
 Large frames split at 8,000 cells / 30,000 cloud points. The epoch field lets the client discard in-flight stale data after a seek.
 
@@ -433,7 +434,7 @@ uv run pytest
 
 | Test file | Tests | Coverage |
 |-----------|-------|----------|
-| `test_grid_geometry.py` | 26 | Ring/sector indexing, cell counts, memory report, round-trip xy→cell |
+| `test_grid_geometry.py` | 26 | Ring/sector indexing, cell counts, memory report, round-trip xy->cell |
 | `test_projection.py` | 10 | CPU/GPU parity, nearest-wins, KNN back-projection, numba JIT parity, edge cases |
 | `test_label_mapping.py` | 9 | remap_labels, bin_5_to_4, compute_class_weights |
 | `test_grid_update.py` | 8 | Per-frame occupancy (precise), snapshot/delta compute/commit invariants, dropped-delta recompute, reset |

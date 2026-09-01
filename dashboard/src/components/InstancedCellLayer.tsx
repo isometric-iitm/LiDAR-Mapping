@@ -42,11 +42,8 @@ type SlotCache = {
   hex: Map<number, number>;
 };
 
-// Slot-based incremental instancing. Geometry, matrices and colors are only
-// recomputed for cells that appear in the delta patch, and per-ring/per-sector
-// math is cached, so per-frame cost scales with the number of *changed* cells
-// (~1-3k) instead of a full ~37k rebuild. Freed slots are zero-scaled inside
-// the fixed-capacity InstancedMesh and recycled.
+/* Slot-based incremental instancing. Per-frame cost scales with changed cells
+   (~1-3k), not full ~37k rebuild. Freed slots are zero-scaled and recycled. */
 function InstancedCells({
   cells,
   meta,
@@ -71,10 +68,7 @@ function InstancedCells({
     p: THREE.Vector3;
     c: THREE.Color;
   } | null>(null);
-  // Last frame number actually rendered. When deltas arrive with a jump > 1 it
-  // means intermediate frames were dropped on the wire; those may have carried
-  // upserts/frees that never reached us, so we cheaply reconcile ghost slots
-  // instead of waiting for the periodic full snapshot to heal them.
+  /* Last rendered frame. Frame gaps mean dropped wire frames; reconcile ghost slots cheaply. */
   const lastRenderedFrame = useRef(-1);
 
   useLayoutEffect(() => {
@@ -134,10 +128,7 @@ function InstancedCells({
     const thetaStep = (2 * Math.PI) / meta.n_theta;
     if (c.nRings !== meta.n_rings || Math.abs(c.thetaStep - thetaStep) > 1e-9) {
       clearAll();
-      // Two-phase edges exactly mirror the server: uniform dr_0 through the
-      // phase-1 rings, then dr_0*alpha^j growth, with the outer edge clamped
-      // to r_max. (The old dr_0*alpha^k-for-all-rings formula drifted from the
-      // server's real ring layout the farther out a cell sat.)
+      /* Two-phase edges mirror the server: uniform dr_0 then dr_0*alpha^j, clamped to r_max. */
       c.edges = computeRingEdges(meta);
       c.thetaStep = thetaStep;
       c.nRings = meta.n_rings;
@@ -161,9 +152,7 @@ function InstancedCells({
       const prevSlot = c.slotOf.get(key);
       const prev = prevSlot !== undefined ? c.geo[prevSlot] : null;
       // Dirty-skip on the exact display inputs (height, class, occ, trav).
-      // trav is wired to the per-instance colour in trav mode, so it must be
-      // part of the dirty key (a trav change with unchanged geometry would
-      // otherwise never recolor). Occ drives alpha/brightness.
+      /* trav drives per-instance colour in trav mode; occ drives alpha. Both must be in dirty key. */
       if (
         prev &&
         prev.zMax === zMax &&
@@ -196,9 +185,7 @@ function InstancedCells({
       const secA = c.sec[j];
       const height = Math.min(12, Math.max(0.35, zMax));
       const posY = height / 2;
-      // Reuse the cached geometry: matrix only changes with (pos, rot, scale),
-      // all of which are fixed by (i, j, zMax). If those are unchanged we skip
-      // the compose + setMatrixAt entirely (~37k/frame saved in steady scenes).
+      /* Skip matrix update if (pos, rot, scale) unchanged (~37k/frame saved in steady scenes). */
       const needMatrix = !prev ||
         prev.pos[0] !== b.posX || prev.pos[1] !== posY || prev.pos[2] !== b.posZ ||
         prev.rotY !== secA.th ||
@@ -220,9 +207,7 @@ function InstancedCells({
       } else {
         cellColor = c.hex.get(cls) ?? 0xffffff;
       }
-      // Per-band donut shading: gentler falloff so the outer rings stay
-      // legible (10m/25m/50m previously too dark). Pure range, no DK.
-      // 0-5m:1.00  5-10m:0.90  10-25m:0.78  25-50m:0.62  50m+:0.48
+      /* Per-band donut shading for legibility: 0-5m:1.0 5-10m:0.9 10-25m:0.78 25-50m:0.62 50m+:0.48 */
       const rMid = (c.edges[i] + c.edges[i + 1]) / 2;
       const bandIntensity = rMid < 5 ? 1.0 : rMid < 10 ? 0.9 : rMid < 25 ? 0.78 : rMid < 50 ? 0.62 : 0.48;
       t.c.setHex(cellColor);
@@ -258,9 +243,7 @@ function InstancedCells({
       const key = keyOf(i, j, meta.n_theta);
       const slot = c.slotOf.get(key);
       if (slot === undefined) return false;
-      // Park freed instances far below ground with zero scale so they don't
-      // cluster at the ego origin as degenerate flickering lines/dots (precise
-      // mode frees ~30k slots per frame).
+      /* Park freed instances far below ground with zero scale (prevents flickering at ego origin). */
       t.p.set(0, -1000, 0);
       t.s.set(0, 0, 0);
       t.q.identity();
@@ -274,8 +257,7 @@ function InstancedCells({
       return true;
     };
 
-    // Free any slot whose cell is absent from the authoritative map. Called for
-    // ghost healing after dropped frames and for full snapshot reconciliation.
+    /* Free slots absent from the authoritative map (ghost healing + snapshot reconciliation). */
     const freeStale = (): number => {
       let n = 0;
       for (const key of [...c.slotOf.keys()]) {
@@ -286,10 +268,7 @@ function InstancedCells({
       return n;
     };
 
-    // Add any cell that is in the authoritative map but has no renderer slot
-    // (the inverse of freeStale); heals rows lost across a dropped frame that
-    // the server or a missed chunk couldn't deliver. Bounded per call so a
-    // poisoned map can never stall a frame indefinitely.
+    /* Heal cells in the map that have no renderer slot (inverse of freeStale). Bounded per call. */
     const healMissing = (caps: number): number => {
       let n = 0;
       for (const cell of cells.values()) {
@@ -302,12 +281,8 @@ function InstancedCells({
       return n;
     };
 
-    // Compacts the slot layout when the recycled-free list has grown large
-    // relative to the live count, so mesh.count (the GPU instance buffer width)
-    // tracks the live scene instead of the historic high-water mark that would
-    // otherwise climb toward MAX_INSTANCES and never come back down. Rebuilds
-    // `slotOf` so live cells occupy the lowest contiguous slots. O(live);
-    // only run periodically (on snapshots) to bound cost.
+    /* Compact slots: move live cells to lowest contiguous slots so mesh.count tracks
+       the live scene, not the high-water mark. O(live); run on snapshots only. */
     const compactSlots = (): boolean => {
       if (c.free.length < 256 || c.free.length < c.slotOf.size) return false;
       const reindex = new Map<number, number>();
@@ -350,11 +325,7 @@ function InstancedCells({
     } else if (patch.kind === "delta") {
       for (const cell of patch.upserts) { if (writeCell(cell)) written++; dirty = true; }
       for (const [i, j] of patch.frees) { if (freeCell(i, j)) { freed_count++; dirty = true; matDirty = true; colDirty = true; } }
-      // Belt-and-suspenders ghost healing: if deltas jumped over dropped frames,
-      // some cells may have been lost on the wire. Free renderer slots whose
-      // cell is no longer authoritative, and (bounded) add authoritative cells
-      // that have no slot, so no ghosts linger and no cells go missing until the
-      // next snapshot.
+      /* Ghost healing on frame gaps: free stale slots, heal missing cells until next snapshot. */
       if (lastRenderedFrame.current >= 0 && patch.frame - lastRenderedFrame.current > 1) {
         const healed = freeStale();
         if (healed > 0) {
@@ -365,8 +336,7 @@ function InstancedCells({
       }
       lastRenderedFrame.current = patch.frame;
     } else {
-      // snapshot: reconcile against the authoritative full map, skipping
-      // slots/rows whose values are unchanged so steady-state snapshots are ~free.
+      /* Snapshot: reconcile against authoritative full map, skipping unchanged slots (~free in steady state). */
       const healed = freeStale();
       if (healed > 0) {
         freed_count += healed; dirty = true; matDirty = true; colDirty = true;
@@ -376,8 +346,7 @@ function InstancedCells({
         if (!cells.has(key)) continue;
         if (writeCell(cell)) written++;
       }
-      // heal any authoritative cell still missing a slot (e.g. a dropped delta),
-      // then compact the freelist-driven high-water slot count back down.
+      /* Heal any authoritative cell still missing a slot (e.g. dropped delta), then compact high-water slot count. */
       written += healMissing(5000);
       if (compactSlots()) { dirty = true; matDirty = true; colDirty = true; }
       lastRenderedFrame.current = patch.frame;
@@ -397,8 +366,7 @@ function InstancedCells({
     }
   }, [cells, meta, patch, opacity, travMode]);
 
-  // Ensure the bounding sphere covers the full scene so raycasting finds
-  // instances even when most slots are at the origin (freed / not yet written).
+  /* Ensure bounding sphere covers full scene so raycasting finds instances even when most slots are at origin. */
   useLayoutEffect(() => {
     const mesh = ref.current;
     if (!mesh) return;

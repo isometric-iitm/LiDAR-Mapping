@@ -126,8 +126,7 @@ def resolve_path(value: str | Path) -> Path:
     return repo_root() / p
 
 
-# env var -> list of dotted config paths it can override. Both ckpt dirs map to
-# the same var because pipeline.yaml and train_range_image.yaml name it differently.
+# env var -> list of dotted config paths it can override (both ckpt dirs map to the same var).
 _ENV_TARGETS: dict[str, list[list[str]]] = {
     "PC2D_SEQ_DIR": [["source", "seq_dir"]],
     "PC2D_CHECKPOINT": [["model", "checkpoint"]],
@@ -137,10 +136,10 @@ _ENV_TARGETS: dict[str, list[list[str]]] = {
     "PC2D_DEVICE": [["model", "device"]],
     "PC2D_PRECISION": [["model", "precision"]],
     "PC2D_PLAYBACK_SPEED": [["source", "playback_speed"]],
+    "PC2D_CORS_ORIGINS": [["dashboard", "cors_origins"]],
 }
 
-# Which sections each env var can touch, used to restrict overrides to the YAML
-# actually loaded (pipeline vs train). Mapping env -> top-level section names.
+# Which sections each env var can touch, restricts overrides to the loaded YAML (pipeline vs train).
 _ENV_SECTIONS: dict[str, set[str]] = {
     "PC2D_SEQ_DIR": {"source"},
     "PC2D_CHECKPOINT": {"model"},
@@ -150,6 +149,7 @@ _ENV_SECTIONS: dict[str, set[str]] = {
     "PC2D_DEVICE": {"model"},
     "PC2D_PRECISION": {"model"},
     "PC2D_PLAYBACK_SPEED": {"source"},
+    "PC2D_CORS_ORIGINS": {"dashboard"},
 }
 
 # env var -> cast applied to the string value before it overrides the YAML.

@@ -24,7 +24,7 @@ class SemanticKITTIReplayer:
     A background thread prefetches a bounded window of upcoming velodyne frames
     into memory (the ``prefetch_window``). ``get()`` still paces the stream at
     the native cadence and hands frames to the consumer one-by-one in real time
-    — the prefetch only hides the disk read latency so a slow disk ("disk=NNms"
+    ; the prefetch only hides the disk read latency so a slow disk ("disk=NNms"
     spikes) never starves the stream or causes frame drops. Frames are never
     delivered early; they just sit in the buffer until ``get()`` releases them.
     """
@@ -65,7 +65,7 @@ class SemanticKITTIReplayer:
         with self._cv:
             self._prime_locked()
 
-    # ------------------------------------------------------------------ io
+    # io
     def _read_disk(self, idx: int) -> Frame:
         pts = np.fromfile(str(self.bin_paths[idx]), dtype=np.float32).reshape(-1, 4)
         return Frame(timestamp=idx / self.native_hz, points=pts, seq_id=self.seq_id, idx=idx)
@@ -77,7 +77,7 @@ class SemanticKITTIReplayer:
             return None, False
         return self._read_disk(idx), True
 
-    # ------------------------------------------------------------- pacing
+    # pacing
     def _reset_time(self):
         self._t_next = time.perf_counter()
         self._started = False
@@ -132,7 +132,7 @@ class SemanticKITTIReplayer:
             self._cv.notify_all()
         return f
 
-    # ---------------------------------------------------------- prefetch
+    # prefetch
     def _prime_locked(self):
         """(Re)start prefetch from the current cursor. Caller holds self._cv."""
         self._buf.clear()
@@ -167,7 +167,7 @@ class SemanticKITTIReplayer:
                         return
             # loop: full buffer (wait for a consume) or eof; re-check predicate
 
-    # ------------------------------------------------------------- control
+    # control
     def restart(self):
         self.i = 0
         with self._cv:

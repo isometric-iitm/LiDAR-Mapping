@@ -13,7 +13,7 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "PC²D Semantic Mapping Dashboard",
+  title: "PC2D Semantic Mapping Dashboard",
   description: "Live 2.5D log-polar grid mapping from SemanticKITTI seq 08 via a range-image UNet.",
 };
 

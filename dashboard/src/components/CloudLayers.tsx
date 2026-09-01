@@ -4,10 +4,9 @@ import { useLayoutEffect, useRef } from "react";
 import * as THREE from "three";
 import { CLASS_COLOR } from "@/lib/colors";
 
-// ---- point cloud (raw sensor + segmented) ----
-// Map convention: forward = +X, left = +Z, up = +Y.
-// Sensor cloud rows are (x=forward, y=left, z=up) -> scene (x, z, y).
-// Optional subset of point indices to pack (skips non-finite points).
+/* point cloud (raw sensor + segmented)
+   Map convention: forward = +X, left = +Z, up = +Y.
+   Sensor cloud rows are (x=forward, y=left, z=up) -> scene (x, z, y). */
 function toMapPositions(src: Float32Array, n: number, idxs?: number[]): Float32Array {
   const out = new Float32Array((idxs ?? Array.from({ length: n }, (_, i) => i)).length * 3);
   const list = idxs ?? Array.from({ length: n }, (_, i) => i);
@@ -47,8 +46,7 @@ function CloudLayer({
     if (!p || !cloud) return;
     const n = cloud.xyz.length / 3;
     const geom = p.geometry;
-    // drop non-finite points (bad pose transforms etc.) so the position
-    // attribute never feeds NaN into computeBoundingSphere
+    /* Drop non-finite points so the position attribute never feeds NaN into computeBoundingSphere. */
     const idxs: number[] = [];
     for (let i = 0; i < n; i++) {
       const a = cloud.xyz[i * 3], b = cloud.xyz[i * 3 + 1], c = cloud.xyz[i * 3 + 2];

@@ -36,19 +36,12 @@ def grid_meta_message(grid) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Binary WS framing. Header: struct "<IHHQQiiiii" = 44 bytes:
-#   <I magic (0x50433244) | <H code (1=snapshot 2=delta 3=cloud) | <H version |
-#   <Q frame | <Q epoch | <i n_a | <i n_b | <i seq | <i total | <i yaw_cd
-# yaw_cd = ego forward yaw in centi-degrees (heading-up rendering), 0 if unknown.
-# Body (all little-endian raw arrays, no JSON number tax):
-#   snapshot: n_a rows x {i,j,z_mean,z_max,occ,trav as f32} then n_a bytes cls u8.
-#   Each row record is padded to 28 bytes (24 f32 + 1 cls + 3 pad) so any
-#   following section (delta freed rows) stays 4-byte aligned for typed-array
-#   views on the client.
-#   delta:    n_a updated rows (as snapshot rows), then n_b freed rows x {i,j as f32}
-#   cloud:    n_a points x {x,y,z as f32} then n_a bytes cls u8
-# ---------------------------------------------------------------------------
+# Binary WS framing: header "<IHHQQiiiii" (44 bytes):
+#   magic(0x50433244) code(1=snap,2=delta,3=cloud) version frame epoch n_a n_b seq total yaw_cd
+# Row record: 28 bytes (6 f32 [i,j,z_mean,z_max,occ,trav] + 1 u8 cls + 3 pad).
+#   snapshot: n_a rows + n_a cls bytes
+#   delta: n_a rows + n_a cls bytes + n_b freed rows (2 f32 each)
+#   cloud: n_a xyz f32 + n_a cls bytes
 _MAGIC = 0x50433244
 _VERSION = 3
 K_SNAPSHOT = 1
@@ -117,7 +110,7 @@ def iter_cloud_frames(frame: int, epoch: int, xyz: np.ndarray, cls: np.ndarray,
         yield (_head(K_CLOUD, frame, epoch, e - s, 0, p, total, yaw_cd) + body)
 
 
-# --- Compression (optional, toggled via config) ---
+# Compression (optional, toggled via config)
 _COMPRESS_LEVEL = 1  # zlib fastest (1-9); level 1 is ~50 MB/s compression, ~200 MB/s decompress
 _COMPRESS_THRESHOLD = 512  # don't bother compressing payloads under this many bytes
 
@@ -149,7 +142,7 @@ def decompress_if_needed(data: bytes) -> bytes:
     return data
 
 
-# --- JSON variants (HTTP endpoints / legacy) ---
+# JSON variants (HTTP endpoints / legacy)
 def snapshot_message(grid) -> dict:
     snap = grid.compute_snapshot()
     cells = np.concatenate([snap["rows"], snap["cls"].reshape(-1, 1).astype(np.float32)], axis=1).tolist()

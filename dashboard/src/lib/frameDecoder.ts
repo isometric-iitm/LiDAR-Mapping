@@ -30,8 +30,7 @@ export function createFrameDecoder(): FrameDecoder | null {
         else p.reject(new Error("frame worker parse failed"));
       };
       worker.onerror = () => {
-        // Worker hard-failed: reject everything outstanding and mark it dead so
-        // the next call spins up a fresh one.
+        /* Worker hard-failed: reject everything outstanding and mark dead so next call spins up fresh one. */
         const all = [...pending.values()];
         pending.clear();
         all.forEach((p) => p.reject(new Error("frame worker crashed")));

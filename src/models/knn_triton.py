@@ -1,16 +1,8 @@
 """Triton 3x3 KNN gather-mean for the segmenter's back-projection.
 
-The numpy/torch path builds a (n, 9) flat index tensor then does one big gather
-plus a mean, fine, but on CUDA it materializes n*9*8 bytes of indices plus the
-gathered tensor. This kernel fuses the clamp+shift+clamp, the gather, and the
-mean into one pass so no index materialization happens at all. It is a pure
-speed-up of ``Segmenter._knn_probs``: results are bit-compatible with the
-torch fallback (same summation order is the only difference, mean over the same
-9 neighbours).
-
-Only used for float32 CUDA tensors with k == 3 (the segmenter's live path);
-anything else falls back to the torch implementation. Import failure on a
-machine without triton is non-fatal (the fallback covers it).
+Fuses clamp+shift+clamp, gather, and mean into one pass (no index materialization).
+Results are bit-compatible with the torch fallback. Only for float32 CUDA with k==3;
+anything else falls back. Import failure is non-fatal.
 """
 
 import logging

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Evaluation harness -- pixel-level and point-level mIoU with per-distance-band breakdown.
+"""Evaluation harness: pixel/point mIoU with per-distance-band breakdown.
 
-All paths and model parameters come from config YAML + env overrides.
 Outputs: results/eval_{timestamp}.json, confusion_matrices.png,
-         per_distance_band.png, per_class_iou.png, eval_summary.md
+per_distance_band.png, per_class_iou.png, eval_summary.md
 """
 
 import argparse
@@ -182,9 +181,7 @@ def evaluate_pixel_level(model, val_loader, device, num_classes, use_amp, max_ra
     n_samples = 0
 
     with torch.inference_mode():
-        # Warmup: run 2 forward passes on the first batch so CUDA init,
-        # cuDNN autotuner, and torch.compile (if active) finish before
-        # any latency is recorded. These iterations are not timed.
+        # Warmup: 2 forward passes before timing (CUDA init, cuDNN autotune, torch.compile).
         warmup_batch = None
         for batch_idx, batch in enumerate(val_loader):
             ri_batch, li_batch = batch
@@ -266,11 +263,7 @@ def evaluate_point_level(seq_dir, checkpoint, model_cfg, train_cfg,
         precision=precision,
     )
 
-    # Warmup with a realistic-sized scan (~120k points) so the CUDA kernels
-    # for the actual input shape are compiled before timing starts. The
-    # segmenter's built-in warmup only exercises the UNet forward (fixed
-    # 1x5x64x2048 shape); this exercises the full projection+segment
-    # pipeline at live scan size.
+    # Warmup with ~120k-point scan so CUDA kernels compile before timing.
     warmup_pts = np.random.randn(120_000, 4).astype(np.float32)
     warmup_pts[:, 3] = 0.5
     segmenter.segment(warmup_pts)

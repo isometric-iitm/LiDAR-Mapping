@@ -165,10 +165,7 @@ export default function TrainingCurves() {
       .finally(() => setLoading(false));
   }, []);
 
-  // history.jsonl logs the same "step" once per epoch (step 500, 1000, ... in
-  // epoch 0, 1, 2), so a raw "metrics vs step" line chart overplots 2-3 points
-  // at every x. Dedupe to the most recent record per step and sort ascending so
-  // the x-axis is monotonic and each step appears exactly once.
+  /* Dedupe history.jsonl to the most recent record per step (same step logged once per epoch). */
   const series = useMemo(() => {
     const byStep = new Map<number, HistoryEntry>();
     for (const e of data) byStep.set(e.step, e);

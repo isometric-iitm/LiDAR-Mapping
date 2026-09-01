@@ -109,9 +109,7 @@ export function useMapStream(): UseMapStream {
   const full = useRef<Map<number, Cell>>(new Map());
   const snapBuf = useRef<Map<number, Cell>>(new Map());
   const snapFrame = useRef(-1);
-  // Lightweight live-count state so the sidebar "Cells"/empty-hint update every
-  // delta without an O(n) `cells` copy each frame (`cells` stays authoritative
-  // on snapshot/reset only - same-ref mutation on deltas would otherwise bail out).
+  /* Live-count state for sidebar updates without O(n) copy each frame. */
   const [liveCount, setLiveCount] = useState(0);
   const sendRef = useRef<(msg: object) => void>(() => {});
   const freezeFrame = useRef(-1); // -1 = live; else hold grid state at this frame
@@ -123,12 +121,9 @@ export function useMapStream(): UseMapStream {
   const deltaAcc = useRef<Cell[]>([]);
   const deltaFreed = useRef<number[]>([]);
   const deltaFrame = useRef(-1);
-  // Monotonically increasing frame counter: any decoded message whose frame
-  // is ≤ this is stale (arrived out of order from the async decoder pipeline)
-  // and must be dropped to prevent cross-contamination of accumulators.
+  /* Monotonic frame counter: decoded messages with frame <= this are stale and dropped. */
   const lastAppliedFrame = useRef(-1);
-  // Binary frame decode (pako inflate + 28-byte row parse) runs in a worker so
-  // it never contends with React/R3F for the main thread.
+  /* Binary frame decode (pako inflate + 28-byte row parse) runs in a worker so it never contends with React/R3F. */
   const decoderRef = useRef<FrameDecoder | null>(null);
   if (decoderRef.current === null) decoderRef.current = createFrameDecoder();
 
@@ -284,21 +279,12 @@ export function useMapStream(): UseMapStream {
         }
 
         if (msg.type === "delta") {
-          // Frame-ordering guard: drop any decoded frame that is stale (arrived
-          // out of order from the async decoder pipeline; its frame is ≤ the
-          // last one we successfully applied).
+          /* Drop stale decoded frames that arrived out of order (frame <= last applied). */
           if (msg.frame <= lastAppliedFrame.current) return;
 
-          // Incremental frame. The server sends each frame as a chain of chunks
-          // (seq 0..total-1); 'freed' rides on the final chunk (but treat frees
-          // as frame-scoped regardless of arrival chunk). We accumulate the
-          // whole frame then apply it ONCE at the last chunk so that:
-          //   1) a re-added cell is not wrongly deleted by its own frame's free
-          //      (free-before-upsert): freed indices are collected, then all
-          //      upserts win on the final apply.
-          //   2) a fresh frame always discards any half-accumulated prior frame
-          //      (reset on frame change, not just seq==0) so upserts never leak
-          //      across a dropped frame boundary.
+          /* Incremental frame: accumulate chunks (seq 0..total-1), apply once on
+             final chunk so freed-before-upsert is correct, and reset on frame change
+             so no half-accumulated state leaks across dropped frames. */
           const t0 = performance.now();
           if (msg.seq === 0 || msg.frame !== deltaFrame.current) {
             deltaAcc.current = [];
@@ -312,12 +298,7 @@ export function useMapStream(): UseMapStream {
             deltaFreed.current.push(keyOf(i, j, nThetaRef.current));
           }
           if (msg.seq === msg.total - 1) {
-            // Gap detection: if this frame is more than 1 ahead of the last
-            // applied frame, intermediate frames were lost on the wire. Purge
-            // stale entries from the authoritative map (cells that the server
-            // no longer considers rendered) before applying the delta, so
-            // map_size doesn't balloon with ghost entries until the next
-            // snapshot.
+            /* Gap detection: purge stale entries if intermediate frames were lost. */
             const gap = lastAppliedFrame.current >= 0
               ? msg.frame - lastAppliedFrame.current - 1
               : 0;
@@ -332,8 +313,7 @@ export function useMapStream(): UseMapStream {
               }
             }
             const mapCopy0 = performance.now();
-            // Free first, then upsert so a cell both freed and re-added in the
-            // same frame ends up present (the upsert wins).
+            /* Free first, then upsert so a cell both freed and re-added in the same frame ends up present. */
             for (const k of deltaFreed.current) {
               full.current.delete(k);
             }

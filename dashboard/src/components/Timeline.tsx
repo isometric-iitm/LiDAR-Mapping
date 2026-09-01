@@ -141,7 +141,7 @@ export default function Timeline({ seqPos, seqLen, paused, speed, seeking, buffe
       >
         {SPEEDS.map((s) => (
           <option key={s} value={s}>
-            {s.toFixed(1)}×
+            {s.toFixed(1)}x
           </option>
         ))}
       </select>

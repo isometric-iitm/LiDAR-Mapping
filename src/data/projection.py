@@ -114,12 +114,8 @@ def build_range_image_gpu(
     """
     flat = row * w + col
 
-    # Sort points lexicographically by (cell, range) ascending with a single
-    # fused key. Choosing an integer `scale` strictly larger than any range
-    # guarantees pk = cell*scale + r packs both coordinates without any
-    # cross-cell collision: within a cell it orders by range (nearest first),
-    # and across cells the cell index strictly dominates. This replaces the
-    # former two sequential argsorts with one sort while staying equivalent.
+    # Single-sort key: pk = cell*scale + range (scale > max range) replaces
+    # two sequential argsorts while staying equivalent.
     scale = torch.ceil(r.max()).to(torch.float64) + 1.0
     pk = flat.to(torch.float64) * scale + r.to(torch.float64)
     order = torch.argsort(pk, stable=True)

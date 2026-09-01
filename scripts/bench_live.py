@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Wall-clock benchmark of the LIVE grid path (no GPU, no sensor data).
+"""Wall-clock benchmark of the live grid path (no GPU, no sensor data).
 
-This mirrors what src/server/app.py's ingest loop does each frame in precise
-mode: update the grid from a synthetic scan, compute_delta, (simulate) send it,
-commit_delta, plus a periodic snapshot every `--snapshot-interval` frames.
-Unlike bench_grid.py (which reports the grid-internal per-stage timings), this
-times the whole call sequence from the caller's perspective, wall-clock, which
-is what actually gates the live 30fps dashboard stream.
+Mirrors the server ingest loop: update, compute_delta, send, commit_delta,
+plus periodic snapshots. Times the whole call sequence wall-clock (what gates
+the 30fps stream), unlike bench_grid.py which reports per-stage timings.
 
 Usage:
     uv run python scripts/bench_live.py [--frames 300] [--n 60000] [--snap-interval 5]

@@ -133,8 +133,7 @@ def main():
     raw_root = resolve_path(args.raw_root if args.raw_root else data_cfg.get("raw_root", "data/sequences"))
     processed_root = resolve_path(args.processed_root if args.processed_root else data_cfg.get("processed_root", "data/processed"))
 
-    # Warn when the resolved path still points at the legacy absolute F:/ location,
-    # since it must be mounted on this machine for it to be valid.
+    # Warn when resolved path still points at legacy F:/ location (must be mounted on this machine).
     resolved_raw = str(raw_root)
     resolved_proc = str(processed_root)
     if resolved_raw.startswith("F:") or "F:/" in resolved_raw:
