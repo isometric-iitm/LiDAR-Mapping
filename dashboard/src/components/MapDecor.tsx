@@ -22,6 +22,9 @@ export function RangeRings({ maxR }: { maxR: number }) {
             position={[r + 1.5, 0.3, 0]}
             center
             sprite
+            /* Sit just above the 3D scene but below HUD chrome / the loading
+             * overlay (default [16777271, 0] would paint over everything). */
+            zIndexRange={[2, 2]}
             style={{ pointerEvents: "none" }}
           >
             <span className="hud-val whitespace-nowrap rounded bg-black/70 px-1.5 py-0.5">

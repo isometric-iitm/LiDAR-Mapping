@@ -25,8 +25,8 @@ import type { DemoManifest } from "./manifest";
 import { fetchManifest, demoBase } from "./manifest";
 import { fetchAsset, type ProgressCb } from "./assetCache";
 import { RangeProjector } from "./projector";
-import { LogPolarGrid, type CellRow } from "./logpolarGrid";
-import { makeBinLut, gatherPointProbs, argmaxClasses, binClasses } from "./postprocess";
+import { LogPolarGrid } from "./logpolarGrid";
+import { makeBinLut, gatherArgmax, binClasses } from "./postprocess";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type OrtModule = any;
@@ -47,8 +47,7 @@ let manifest: DemoManifest | null = null;
 let binLut: Uint8Array | null = null;
 let grid: LogPolarGrid | null = null;
 let projector: RangeProjector | null = null;
-let pixelSoftmax: Float32Array | null = null;
-let pointProbs: Float32Array | null = null;
+let accScratch: Float32Array | null = null;
 let cls5: Uint8Array | null = null;
 
 const chunks: (ChunkState | undefined)[] = [];
@@ -89,9 +88,11 @@ const MAX_WINDOW = 100;
 const winProc: number[] = [];
 const winSeg: number[] = [];
 const winGrid: number[] = [];
+const winPack: number[] = [];
 const winCloud: number[] = [];
 const winProject: number[] = [];
 const winForward: number[] = [];
+const winPost: number[] = [];
 const winLat: number[] = [];
 
 function post(msg: unknown, transfer?: Transferable[]): void {
@@ -318,18 +319,17 @@ async function processFrame(fi: number): Promise<void> {
   projector!.project(pointsBuf, n);
   const tp1 = performance.now();
 
-  // ONNX inference
+  // ONNX inference (graph ends in Softmax -> output is probabilities)
   const tf0 = performance.now();
   const input = new ort!.Tensor("float32", projector!.image, [1, m.model.in_channels, m.model.h, m.model.w]);
   const out = await session!.run({ range_image: input });
-  const logits = out.logits.data as Float32Array;
+  const probs = out.logits_probs.data as Float32Array;
   const tf1 = performance.now();
 
-  // postprocess: softmax -> 3x3 prob gather -> argmax -> bin 5->4
+  // postprocess: 3x3 prob gather + argmax (fused) -> bin 5->4
   const tpp0 = performance.now();
   const C = m.model.num_classes;
-  gatherPointProbs(logits, projector!.proj, n, C, m.model.h, m.model.w, pixelSoftmax!, pointProbs!);
-  argmaxClasses(pointProbs!, n, C, cls5!);
+  gatherArgmax(probs, projector!.proj, n, C, m.model.h, m.model.w, accScratch!, cls5!);
   binClasses(cls5!, binLut!);
   const tpp1 = performance.now();
 
@@ -338,21 +338,27 @@ async function processFrame(fi: number): Promise<void> {
   grid!.update(pointsBuf, cls5!, n);
   const tg1 = performance.now();
 
-  // delta / snapshot (pure) -> deliver -> commit
+  // delta / snapshot (pure) -> deliver (zero-copy) -> commit
+  const tk0 = performance.now();
   const isSnap = grid!.frame - lastSnapshotFrame >= SNAPSHOT_IV;
   const delta = isSnap ? grid!.computeSnapshot() : grid!.computeDelta();
+  const tk1 = performance.now();
   const yawCd = m.yaws_cd[fi] ?? 0;
   const yaw = ((yawCd / 100) * Math.PI) / 180;
-  const rows: CellRow[] = delta.rows;
-  post({
-    type: "patch",
-    kind: isSnap ? "snap" : "delta",
-    frame: grid!.frame,
-    epoch,
-    rows,
-    freed: delta.freed,
-    yaw,
-  });
+  post(
+    {
+      type: "patch",
+      kind: isSnap ? "snap" : "delta",
+      frame: grid!.frame,
+      epoch,
+      rows: delta.rows,
+      cls: delta.cls,
+      nUps: delta.upCount,
+      freed: delta.freed,
+      yaw,
+    },
+    [delta.rows.buffer, delta.cls.buffer, delta.freed.buffer],
+  );
   grid!.commit(delta);
   if (isSnap) lastSnapshotFrame = grid!.frame;
 
@@ -374,9 +380,11 @@ async function processFrame(fi: number): Promise<void> {
   pushWin(winProc, procMs);
   pushWin(winSeg, tp1 - tp0 + (tf1 - tf0) + (tpp1 - tpp0));
   pushWin(winGrid, tg1 - tg0);
+  pushWin(winPack, tk1 - tk0);
   pushWin(winCloud, cloudMs);
   pushWin(winProject, tp1 - tp0);
   pushWin(winForward, tf1 - tf0);
+  pushWin(winPost, tpp1 - tpp0);
   pushWin(winLat, procMs);
   if (grid!.frame - lastStatsFrame >= STATS_IV) {
     lastStatsFrame = grid!.frame;
@@ -389,6 +397,7 @@ async function processFrame(fi: number): Promise<void> {
       latency_ms_p95: Math.round(percentile(winLat, 0.95) * 10) / 10,
       seg_ms: Math.round(mean(winSeg) * 10) / 10,
       grid_ms: Math.round(mean(winGrid) * 10) / 10,
+      pack_ms: Math.round(mean(winPack) * 10) / 10,
       cloud_ms: Math.round(mean(winCloud) * 10) / 10,
       project_ms: Math.round(mean(winProject) * 10) / 10,
       forward_ms: Math.round(mean(winForward) * 10) / 10,
@@ -502,9 +511,11 @@ function doSeek(fi: number): void {
   winProc.length = 0;
   winSeg.length = 0;
   winGrid.length = 0;
+  winPack.length = 0;
   winCloud.length = 0;
   winProject.length = 0;
   winForward.length = 0;
+  winPost.length = 0;
   winLat.length = 0;
   previewPending = true;
   post({ type: "patch", kind: "reset", frame: 0, epoch });
@@ -596,8 +607,7 @@ async function init(): Promise<void> {
     pointsBuf = new Float32Array(MAX_POINTS * 4);
     cloudXyz = new Float32Array(m.cloud.points_max * 3);
     cloudCls = new Uint8Array(m.cloud.points_max);
-    pixelSoftmax = new Float32Array(m.model.num_classes * m.model.h * m.model.w);
-    pointProbs = new Float32Array(MAX_POINTS * m.model.num_classes);
+    accScratch = new Float32Array(m.model.num_classes);
     cls5 = new Uint8Array(MAX_POINTS);
 
     // 3) chunk 0 (blocking) then ready

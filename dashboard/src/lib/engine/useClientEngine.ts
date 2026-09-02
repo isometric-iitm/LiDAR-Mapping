@@ -32,8 +32,49 @@ export type UseClientEngine = UseMapStream & {
 
 type WorkerPatch =
   | { type: "patch"; kind: "reset"; frame: number; epoch: number }
-  | { type: "patch"; kind: "snap"; frame: number; epoch: number; rows: Cell[]; yaw?: number }
-  | { type: "patch"; kind: "delta"; frame: number; epoch: number; rows: Cell[]; freed: [number, number][]; yaw?: number };type WorkerMsg =
+  | {
+      type: "patch";
+      kind: "snap";
+      frame: number;
+      epoch: number;
+      /** (k,6) f32: i, j, zMean, zMax, occ, trav */
+      rows: Float32Array;
+      /** (k,) u8: cls */
+      cls: Uint8Array;
+      nUps: number;
+      yaw?: number;
+    }
+  | {
+      type: "patch";
+      kind: "delta";
+      frame: number;
+      epoch: number;
+      rows: Float32Array;
+      cls: Uint8Array;
+      nUps: number;
+      /** (m,2) f32 flat [i,j,...] */
+      freed: Float32Array;
+      yaw?: number;
+    };
+
+/** Unpack a binary patch into the Cell tuple shape the renderer consumes.
+ *  Single tight loop; frees are read from the flat f32 pairs (snap has none). */
+function unpackPatch(msg: Extract<WorkerPatch, { kind: "snap" | "delta" }>): { upserts: Cell[]; frees: [number, number][] } {
+  const k = msg.nUps;
+  const upserts: Cell[] = new Array(k);
+  const rows = msg.rows;
+  const cls = msg.cls;
+  for (let q = 0; q < k; q++) {
+    const o6 = q * 6;
+    upserts[q] = [rows[o6], rows[o6 + 1], rows[o6 + 2], rows[o6 + 3], cls[q], rows[o6 + 4], rows[o6 + 5]];
+  }
+  if (msg.kind !== "delta") return { upserts, frees: [] };
+  const nf = msg.freed.length / 2;
+  const frees: [number, number][] = new Array(nf);
+  const f = msg.freed;
+  for (let q = 0; q < nf; q++) frees[q] = [f[q * 2], f[q * 2 + 1]];
+  return { upserts, frees };
+}type WorkerMsg =
   | { type: "ready" }
   | { type: "grid_meta" } & GridMeta
   | { type: "status"; state: string; msg?: string }
@@ -186,24 +227,25 @@ export function useClientEngine(): UseClientEngine {
         }
         if (msg.frame <= lastAppliedFrame.current) return;
         const nTheta = nThetaRef.current;
+        const { upserts, frees } = unpackPatch(msg);
         if (msg.kind === "snap") {
           const next = new Map<number, Cell>();
-          for (const c of msg.rows) next.set(keyOf(c[0], c[1], nTheta), c);
+          for (const c of upserts) next.set(keyOf(c[0], c[1], nTheta), c);
           full.current = next;
           setCells(new Map(next));
           setLiveCount(next.size);
           setLastFrame(msg.frame);
           lastAppliedFrame.current = msg.frame;
-          setPatch({ kind: "snap", frame: msg.frame, upserts: msg.rows });
+          setPatch({ kind: "snap", frame: msg.frame, upserts });
         } else {
           // frees first, then upserts (a freed+re-added cell stays present)
-          for (const [i, j] of msg.freed) full.current.delete(keyOf(i, j, nTheta));
-          for (const c of msg.rows) full.current.set(keyOf(c[0], c[1], nTheta), c);
+          for (const [i, j] of frees) full.current.delete(keyOf(i, j, nTheta));
+          for (const c of upserts) full.current.set(keyOf(c[0], c[1], nTheta), c);
           setCells(full.current);
           setLiveCount(full.current.size);
           setLastFrame(msg.frame);
           lastAppliedFrame.current = msg.frame;
-          setPatch({ kind: "delta", frame: msg.frame, upserts: msg.rows, frees: msg.freed });
+          setPatch({ kind: "delta", frame: msg.frame, upserts, frees });
         }
         if (full.current.size > 0) setBuffering(false);
         return;

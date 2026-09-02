@@ -6,10 +6,11 @@ reference exporter). This script:
 
   1. loads the checkpoint (honours $PC2D_CHECKPOINT like the rest of the repo),
   2. exports a static-shape (1, 5, 64, 2048) opset-17 fp32 graph,
-  3. converts weights to fp16 while KEEPING fp32 I/O (ORT-Web feeds fp32;
-     keep_io_types=True avoids feeding half tensors from JS),
-  4. writes dashboard/public/demo/models/unet_web_fp16.onnx (~24 MB, under
-     the Cloudflare Pages 25 MiB per-file limit),
+  3. appends a Softmax node on the fp32 output (computed on the GPU by
+     ORT-Web; saves ~655k JS Math.exp calls per frame in the browser),
+  4. writes dashboard/public/demo/models/unet_web_fp16_sm.onnx (~24 MB, under
+     the Cloudflare Pages 25 MiB per-file limit; the _sm suffix invalidates
+     stale IndexedDB caches),
   5. smoke-tests with onnxruntime (CPU) and runs a numerical parity gate:
      torch fp32 vs ONNX fp16 argmax agreement on a REAL KITTI range image
      (frame 000000 of $PC2D_SEQ_DIR) must be >= 99.5% of labelled pixels,
@@ -142,12 +143,12 @@ def build_range_image(points: np.ndarray, h: int, w: int, fov_top_deg: float,
     return ri, proj
 
 
-def knn_probs_torch(pixel_logits: torch.Tensor, proj: torch.Tensor, k: int = 3) -> torch.Tensor:
-    """Mean of the (k,k) neighbour probabilities per point (Segmenter._knn_probs, k=3)."""
-    _, c, h, w = pixel_logits.shape
+def knn_probs_from_probs(pixel_probs: torch.Tensor, proj: torch.Tensor, k: int = 3) -> torch.Tensor:
+    """Mean of the (k,k) neighbour PROBABILITIES per point; input is already
+    softmaxed (the ONNX graph ends in Softmax). Same gather as knn_probs_torch."""
+    _, c, h, w = pixel_probs.shape
     n = proj.shape[0]
-    probs = torch.softmax(pixel_logits.float(), dim=1)
-    pp = probs.permute(0, 2, 3, 1).reshape(-1, c)  # (h*w, c)
+    pp = pixel_probs.permute(0, 2, 3, 1).reshape(-1, c)  # (h*w, c)
     rows = proj[:, 0].clamp(0, h - 1)
     cols = proj[:, 1].clamp(0, w - 1)
     off = torch.arange(-1, 2)
@@ -155,6 +156,10 @@ def knn_probs_torch(pixel_logits: torch.Tensor, proj: torch.Tensor, k: int = 3) 
     cinds = (cols[:, None] + off[None, :]).clamp(0, w - 1).reshape(n, -1)
     flat = rinds * w + cinds  # (n, 9)
     return pp[flat].mean(dim=1)  # (n, c)
+
+
+def np2t(a: np.ndarray) -> torch.Tensor:
+    return torch.from_numpy(np.ascontiguousarray(a))
 
 
 def main() -> int:
@@ -169,7 +174,7 @@ def main() -> int:
     ap.add_argument("--min-agreement", type=float, default=0.995)
     args = ap.parse_args()
 
-    out_default = ROOT / "dashboard" / "public" / "demo" / "models" / "unet_web_fp16.onnx"
+    out_default = ROOT / "dashboard" / "public" / "demo" / "models" / "unet_web_fp16_sm.onnx"
     out_path = Path(args.out) if args.out else out_default
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -204,30 +209,45 @@ def main() -> int:
     )
     print(f"[export-web] fp32 export done in {time.time() - t0:.1f}s ({fp32_tmp.stat().st_size / 1e6:.1f} MB)")
 
-    # 2) fp16 conversion (fp32 I/O preserved)
+    # 2) fp16 conversion (fp32 I/O preserved) + trailing Softmax
     import onnx
+    from onnx import helper as oh, TensorProto as TP
     from onnxruntime.transformers.float16 import convert_float_to_float16
-    print("[export-web] converting weights to fp16 (keep_io_types=True) ...")
+    print("[export-web] converting weights to fp16 (keep_io_types=True) + appending Softmax...")
     m32 = onnx.load(str(fp32_tmp))
     m16 = convert_float_to_float16(m32, keep_io_types=True)
-    onnx.save_model(m16, str(out_path))
+    # Append Softmax(axis=1) so the browser worker reads probabilities directly
+    # (ORT computes it on the WebGPU EP; the JS per-pixel softmax disappears).
+    graph = m16.graph
+    sm_out = graph.output[0].name + "_probs"
+    softmax = oh.make_node(
+        "Softmax", inputs=[graph.output[0].name], outputs=[sm_out], name="softmax_web", axis=1)
+    graph.node.append(softmax)
+    graph.output[0].name = sm_out
+    onnx.save_model(m16, str(out_path.with_suffix(".sm.tmp.onnx")))
+    # Atomic replace: Windows can fail writing over an existing large file handle.
+    import os
+    os.replace(out_path.with_suffix(".sm.tmp.onnx"), out_path)
     size = out_path.stat().st_size
     print(f"[export-web] wrote {out_path} ({size / 1e6:.2f} MB = {size / 1048576:.2f} MiB)")
     if size > 25 * 1048576:
         print(f"[export-web] WARNING: {size / 1048576:.1f} MiB exceeds the 25 MiB Cloudflare Pages per-file limit")
 
-    # 3) ORT smoke test (CPU EP): output shape + finite logits
+    # 3) ORT smoke test (CPU EP): output shape + finite probabilities + rows sum to 1
     import onnxruntime as ort
     sess = ort.InferenceSession(str(out_path), providers=["CPUExecutionProvider"])
     (in_meta,) = sess.get_inputs()
     (out_meta,) = sess.get_outputs()
     print(f"[export-web] ORT inputs: {in_meta.name} {in_meta.type} {in_meta.shape} | outputs: {out_meta.name} {out_meta.type} {out_meta.shape}")
-    logits = sess.run(["logits"], {"range_image": dummy.numpy()})[0]
-    assert logits.shape == (1, n_cls, h, w), f"unexpected output shape {logits.shape}"
-    assert np.isfinite(logits).all(), "non-finite logits"
-    print(f"[export-web] ORT smoke OK: logits {logits.shape} finite, argmax classes={np.unique(logits.argmax(1)).tolist()}")
+    probs = sess.run(["logits_probs"], {"range_image": dummy.numpy()})[0]
 
-    # 4) Numerical parity gate on real KITTI scans
+    assert probs.shape == (1, n_cls, h, w), f"unexpected output shape {probs.shape}"
+    assert np.isfinite(probs).all(), "non-finite probs"
+    row_sums = probs.sum(axis=1)
+    assert np.allclose(row_sums, 1.0, atol=1e-3), "softmax rows do not sum to 1"
+    print(f"[export-web] ORT smoke OK: probs {probs.shape} finite, rows sum to 1, argmax classes={np.unique(probs.argmax(1)).tolist()}")
+
+    # 4) Numerical parity gate on real KITTI scans (torch path applies its own softmax)
     if not args.skip_parity:
         seq_dir = find_seq_dir(args.seq_dir)
         bins = sorted((seq_dir / "velodyne").glob("*.bin"))
@@ -242,15 +262,14 @@ def main() -> int:
             ri_t = torch.from_numpy(ri).unsqueeze(0)  # (1,5,h,w)
             with torch.inference_mode():
                 torch_logits = model(ri_t)
-                tpp = knn_probs_torch(torch_logits, torch.from_numpy(proj), 3)
+                tpp = knn_probs_from_probs(torch.softmax(torch_logits, dim=1), torch.from_numpy(proj), 3)
                 t_pred = tpp.argmax(dim=1).numpy()
-            o_logits = sess.run(["logits"], {"range_image": ri.astype(np.float32)[None]})[0]
-            o_logits_t = torch.from_numpy(o_logits)
-            opp = knn_probs_torch(o_logits_t, torch.from_numpy(proj), 3)
+            o_probs = sess.run(["logits_probs"], {"range_image": ri.astype(np.float32)[None]})[0]
+            opp = knn_probs_from_probs(np2t(o_probs), torch.from_numpy(proj), 3)
             o_pred = opp.argmax(dim=1).numpy()
             agree = float((t_pred == o_pred).mean())
             agreement_all.append(agree)
-            delta = float(np.abs(torch_logits.numpy() - o_logits).mean())
+            delta = float(np.abs(torch_logits.numpy() - np.log(np.maximum(o_probs, 1e-9))).mean())
             print(f"[export-web] parity frame {fi}: n={len(pts)} argmax agreement={agree * 100:.3f}% mean|dlogit|={delta:.5f}")
             if fi == 0 and args.fixture_out:
                 # 5-class -> binned-4 LUT (mirrors dashboard engine postprocess)
@@ -274,6 +293,8 @@ def main() -> int:
         print(f"[export-web] parity gate PASSED (worst {worst * 100:.3f}% >= {args.min_agreement * 100:.1f}%)")
 
     fp32_tmp.unlink(missing_ok=True)
+    for junk in out_path.parent.glob("*.tmp.onnx*"):
+        junk.unlink(missing_ok=True)
     print(f"[export-web] DONE -> {out_path}")
     return 0
 

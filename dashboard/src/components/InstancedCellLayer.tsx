@@ -8,7 +8,11 @@ import { computeRingEdges, ijOf, keyOf } from "@/lib/gridGeometry";
 import type { Cell, GridMeta } from "@/lib/types";
 import type { CellMap, CellPatch } from "@/lib/useMapStream";
 
-const MAX_INSTANCES = 500000;
+/* Slot-based incremental instancing. 150k instances (observed live peak ~60k)
+   keep the per-frame GPU upload 3.3x smaller than the old 500k high-water mark. */
+const MAX_INSTANCES = 150000;
+/* Render debug logging: enabled by adding ?griddebug=1 to the URL. */
+const GRID_DEBUG = typeof window !== "undefined" && window.location.search.includes("griddebug=1");
 
 export type CellInfo = {
   i: number;
@@ -243,14 +247,13 @@ function InstancedCells({
       const key = keyOf(i, j, meta.n_theta);
       const slot = c.slotOf.get(key);
       if (slot === undefined) return false;
-      /* Park freed instances far below ground with zero scale (prevents flickering at ego origin). */
+      /* Park freed instances far below ground with zero scale. Matrix-only
+       * write: the color buffer refreshes when the slot is recycled. */
       t.p.set(0, -1000, 0);
       t.s.set(0, 0, 0);
       t.q.identity();
       t.m.compose(t.p, t.q, t.s);
       mesh.setMatrixAt(slot, t.m);
-      t.c.setHex(0);
-      mesh.setColorAt(slot, t.c);
       c.slotOf.delete(key);
       c.geo[slot] = null;
       c.free.push(slot);
@@ -324,7 +327,11 @@ function InstancedCells({
       lastRenderedFrame.current = patch.frame;
     } else if (patch.kind === "delta") {
       for (const cell of patch.upserts) { if (writeCell(cell)) written++; dirty = true; }
-      for (const [i, j] of patch.frees) { if (freeCell(i, j)) { freed_count++; dirty = true; matDirty = true; colDirty = true; } }
+      if (patch.frees.length > 0) {
+        dirty = true;
+        matDirty = true;
+        for (const [i, j] of patch.frees) { if (freeCell(i, j)) freed_count++; }
+      }
       /* Ghost healing on frame gaps: free stale slots, heal missing cells until next snapshot. */
       if (lastRenderedFrame.current >= 0 && patch.frame - lastRenderedFrame.current > 1) {
         const healed = freeStale();
@@ -352,7 +359,7 @@ function InstancedCells({
       lastRenderedFrame.current = patch.frame;
     }
     const layoutMs = performance.now() - t0;
-    if (written > 0 || freed_count > 0) {
+    if (GRID_DEBUG && (written > 0 || freed_count > 0)) {
       console.log(
         `[grid:render] patch=${patch.kind} written=${written} freed=${freed_count} ` +
         `live=${c.slotOf.size} dirty=${dirty} layout=${layoutMs.toFixed(1)}ms`

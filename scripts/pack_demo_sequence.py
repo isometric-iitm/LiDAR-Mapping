@@ -246,7 +246,7 @@ def main() -> int:
             "history_frames": 30,
         },
         "model": {
-            "file": "models/unet_web_fp16.onnx",
+            "file": "models/unet_web_fp16_sm.onnx",
             "in_channels": 5,
             "num_classes": 5,
             "h": 64,

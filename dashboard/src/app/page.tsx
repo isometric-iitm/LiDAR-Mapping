@@ -309,7 +309,7 @@ export default function Home() {
             error={error}
           />
           {buffering && cellCount > 0 && (
-            <div className="pointer-events-none absolute inset-x-0 top-16 z-10 flex justify-center">
+            <div className="pointer-events-none absolute inset-x-0 top-16 z-20 flex justify-center">
               <div className="frost flex items-center gap-2 px-4 py-2 text-xs text-zinc-300">
                 <Refresh className="h-3.5 w-3.5 animate-spin text-cyan-400" />
                 {statusMsg ?? "Buffering…"}

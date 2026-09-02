@@ -25,7 +25,7 @@ export default function ClientEngineLoader({ initializing, statusMsg, download, 
   const pct = d && d.total > 0 ? Math.floor((d.fraction ?? 0) * 100) : null;
 
   return (
-    <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/80 backdrop-blur-[2px]">
+    <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-black/80 backdrop-blur-[2px]">
       {webgpuUnsupported ? (
         <div className="frost flex max-w-md flex-col items-center gap-3 px-8 py-7 text-center">
           <WarningTriangle className="h-8 w-8 text-amber-400" />

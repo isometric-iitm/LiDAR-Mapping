@@ -1,17 +1,24 @@
 /**
  * Log-polar variable-resolution 2.5D grid — TypeScript port of
- * src/grid_engine/logpolar_grid.py (LogPolarGrid).
+ * src/grid_engine/logpolar_grid.py (LogPolarGrid), optimized for the browser:
  *
- * Semantics (strictly per-frame, "precise mode"):
- *   - occupancy is binary this scan only (hit = occ_gain, else 0 -> freed)
+ *  - Counting sort by cell id (stable, O(n + n_cells)) replaces the O(n log n)
+ *    comparator sort; stability preserves within-cell point order, so the
+ *    segment reduce (zmin/zmax/zsum) matches numpy reduceat semantics.
+ *  - The rendered-cell set is maintained incrementally as a compact list +
+ *    membership flags, so delta extraction and instant-free walk ~52k live
+ *    cells instead of scanning all 469,440 cells five times per frame.
+ *
+ * Semantics (strictly per-frame, "precise mode" — identical to Python):
+ *   - occupancy is binary this scan only (hit = occGain, else 0 -> freed)
  *   - class is the per-frame majority vote of this scan's points
  *   - z stats are this scan's points rebased onto the per-frame ground
  *   - traversability is per-hit from height + majority class
  *   - no temporal state anywhere; stale content frees instantly
  *
- * Delta extraction is pure: computeDelta/computeSnapshot never mutate the
- * sent-tracking state; commit* applies it only after the frame was actually
- * delivered (here: posted to the main thread).
+ * Delta extraction stays pure: computeDelta/computeSnapshot never mutate the
+ * sent-tracking state; commit() applies it only after the frame was
+ * actually delivered.
  */
 
 export interface GridParams {
@@ -41,11 +48,24 @@ export const UNKNOWN = 255;
 /** Cell row as delivered to the dashboard: [i, j, zMean, zMax, cls, occ, trav]. */
 export type CellRow = [number, number, number, number, number, number, number];
 
-export interface GridDelta {
+/** Binary-packed patch. `rows`/`cls`/`freed` are the transferable transport
+ *  buffers; the `up*`/`freedIds` fields are worker-side scratch that
+ *  commit() reads AFTER the transport buffers were transferred (detached). */
+export interface PackedPatch {
   isSnap: boolean;
   frame: number;
-  rows: CellRow[];
-  freed: [number, number][];
+  /** (k,6) f32: i, j, zMean, zMax, occ, trav — transferable */
+  rows: Float32Array;
+  /** (k,) u8: cls — transferable */
+  cls: Uint8Array;
+  /** (m,2) f32: freed [i,j] pairs — transferable */
+  freed: Float32Array;
+  /** worker-side: upsert cell ids (NOT transferred) */
+  upIds: Int32Array;
+  upCount: number;
+  /** worker-side: freed cell ids (NOT transferred) */
+  freedIds: Int32Array;
+  freedCount: number;
 }
 
 export class LogPolarGrid {
@@ -60,25 +80,43 @@ export class LogPolarGrid {
   frame = 0;
   groundZ = 0;
 
-  // state (struct-of-arrays)
+  // per-cell state (struct-of-arrays)
   private readonly zMean: Float32Array;
-  private readonly zMinState: Float32Array;
   private readonly zMaxState: Float32Array;
   private readonly dominant: Uint8Array;
   private readonly occupancy: Float32Array;
   private readonly traversability: Float32Array;
+
+  // rendered-cell tracking: compact list + membership flags (no full scans)
+  private readonly renderedList: Int32Array; // flat cell ids (capacity nCells)
+  private renderedCount = 0;
+  private readonly inRendered: Uint8Array; // 1 if cell is in renderedList
+
   // sent-tracking (mutated only by commit*)
-  private prevRendered: Uint8Array;
   private readonly sentZmax: Float32Array;
   private readonly sentCls: Uint8Array;
+  private readonly wasSent: Uint8Array; // 1 if cell was in the last committed mask
+  private prevSentList: Int32Array; // the committed mask as a compact list
+  private prevSentCount = 0;
 
-  // per-frame scratch (reused)
+  // per-frame scratch (allocated once)
   private readonly nearZ: Float32Array;
   private readonly cellOf: Int32Array;
-  private readonly order: Int32Array;
-  private readonly clsCount: Int32Array; // per-unique-cell C counts
-  private readonly segZ: Float32Array; // sorted z of kept points
-  private readonly segCls: Uint8Array;
+  private readonly zOf: Float32Array;
+  private readonly clsOf: Uint8Array;
+  private readonly hist: Int32Array; // counting-sort histogram (also hit-test)
+  private readonly cursor: Int32Array; // counting-sort scatter cursor
+  private readonly sortedIdx: Int32Array;
+  // per-unique-cell reduce outputs (unique cells <= kept points)
+  private readonly uCell: Int32Array;
+  private readonly uZmin: Float32Array;
+  private readonly uZmax: Float32Array;
+  private readonly uZsum: Float64Array;
+  private readonly uCnt: Int32Array;
+  private readonly uClsCounts: Int32Array; // (cap * nClasses)
+  // delta-path scratch
+  private readonly freeStamp: Uint32Array; // freed-membership stamp (no clearing)
+  private freeStampValue = 0;
 
   constructor(params: GridParams, trav: TravParams, maxPoints: number) {
     this.params = params;
@@ -99,11 +137,7 @@ export class LogPolarGrid {
 
     this.ringWidths = new Float64Array(this.nRings);
     for (let i = 0; i < this.nRings; i++) {
-      if (i < this.phase1Rings) {
-        this.ringWidths[i] = dr0;
-      } else {
-        this.ringWidths[i] = dr0 * Math.pow(alpha, i - this.phase1Rings);
-      }
+      this.ringWidths[i] = i < this.phase1Rings ? dr0 : dr0 * Math.pow(alpha, i - this.phase1Rings);
     }
     if (this.phase2Rings > 0) {
       // clamp final ring so the outer edge lands exactly on rMax
@@ -121,22 +155,35 @@ export class LogPolarGrid {
     this.ringEdges[this.nRings] = rMax;
 
     this.zMean = new Float32Array(this.nCells);
-    this.zMinState = new Float32Array(this.nCells).fill(Infinity);
     this.zMaxState = new Float32Array(this.nCells).fill(-Infinity);
     this.dominant = new Uint8Array(this.nCells).fill(UNKNOWN);
     this.occupancy = new Float32Array(this.nCells);
     this.traversability = new Float32Array(this.nCells);
-    this.prevRendered = new Uint8Array(this.nCells);
+
+    this.renderedList = new Int32Array(this.nCells);
+    this.inRendered = new Uint8Array(this.nCells);
     this.sentZmax = new Float32Array(this.nCells);
     this.sentCls = new Uint8Array(this.nCells).fill(UNKNOWN);
+    this.wasSent = new Uint8Array(this.nCells);
+    this.prevSentList = new Int32Array(1024);
+    this.freeStamp = new Uint32Array(this.nCells);
 
-    const maxKeep = Math.max(1024, maxPoints);
-    this.nearZ = new Float32Array(Math.min(maxKeep, 1 << 16));
-    this.cellOf = new Int32Array(maxKeep);
-    this.order = new Int32Array(maxKeep);
-    this.clsCount = new Int32Array(maxKeep * params.nClasses);
-    this.segZ = new Float32Array(maxKeep);
-    this.segCls = new Uint8Array(maxKeep);
+    const cap = Math.max(1024, maxPoints);
+    this.nearZ = new Float32Array(cap);
+    this.cellOf = new Int32Array(cap);
+    this.zOf = new Float32Array(cap);
+    this.clsOf = new Uint8Array(cap);
+    this.hist = new Int32Array(this.nCells);
+    this.cursor = new Int32Array(this.nCells);
+    this.sortedIdx = new Int32Array(cap);
+    // unique cells are bounded by kept points (several points may share a cell)
+    const uCap = Math.max(4096, cap);
+    this.uCell = new Int32Array(uCap);
+    this.uZmin = new Float32Array(uCap);
+    this.uZmax = new Float32Array(uCap);
+    this.uZsum = new Float64Array(uCap);
+    this.uCnt = new Int32Array(uCap);
+    this.uClsCounts = new Int32Array(uCap * params.nClasses);
   }
 
   /** Ring index via binary search over ringEdges (searchsorted right - 1). */
@@ -144,7 +191,6 @@ export class LogPolarGrid {
     const e = this.ringEdges;
     let lo = 0;
     let hi = e.length; // n_rings + 1
-    // find first index where e[idx] > r  (side="right")
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
       if (e[mid] <= r) lo = mid + 1;
@@ -156,103 +202,105 @@ export class LogPolarGrid {
     return i;
   }
 
-  /** rendered mask: occupancy > threshold. */
-  private renderedInto(mask: Uint8Array): void {
-    const occ = this.occupancy;
-    const t = this.params.occThreshold;
-    for (let c = 0; c < this.nCells; c++) mask[c] = occ[c] > t ? 1 : 0;
-  }
-
   /**
    * Frame update — port of update(points, per_class) + _apply_precise +
-   * _clear_freed. Returns the number of hit cells (0 if nothing kept).
+   * _clear_freed, with counting sort + incremental rendered-list maintenance.
    */
   update(points: Float32Array, perClass: Uint8Array, n: number): number {
     const { rMin, rMax, zMin, zMax, nTheta, nClasses, occGain } = this.params;
-    const { cellOf, order, segZ, segCls } = this;
 
-    // polar coords + per-frame ground reference (20th percentile of near z)
+    // ---- per-frame ground reference (20th percentile of near z) ----
     let nearCount = 0;
     const nearZ = this.nearZ;
     for (let k = 0; k < n; k++) {
       const x = points[k * 4];
       const y = points[k * 4 + 1];
       const z = points[k * 4 + 2];
-      const r = Math.hypot(x, y);
-      if (r > 1.5 && r < 15 && z > -8 && z < 4 && nearCount < nearZ.length) {
+      const r2 = x * x + y * y; // 1.5^2=2.25, 15^2=225 (sqrt-free)
+      if (r2 > 2.25 && r2 < 225 && z > -8 && z < 4 && nearCount < nearZ.length) {
         nearZ[nearCount++] = z;
       }
     }
-    if (nearCount >= 128) {
-      // numpy.percentile(zn, 20) == linear interpolation on sorted values
-      this.groundZ = percentile20(nearZ, nearCount);
-    }
+    if (nearCount >= 128) this.groundZ = percentile20(nearZ, nearCount);
 
-    // keep mask + cell ids
+    // ---- polar coords + keep mask + cell ids (single pass) ----
     let kept = 0;
+    const cellOf = this.cellOf;
+    const zOf = this.zOf;
+    const clsOf = this.clsOf;
     for (let k = 0; k < n; k++) {
       const x = points[k * 4];
       const y = points[k * 4 + 1];
       const z = points[k * 4 + 2];
       const r = Math.hypot(x, y);
       if (r < rMin || r > rMax || z < zMin || z > zMax) continue;
-      const theta = Math.atan2(y, x);
       const ri = this.ringIndex(r);
-      let sj = Math.floor((theta + Math.PI) / ((2 * Math.PI) / nTheta));
+      let sj = Math.floor((Math.atan2(y, x) + Math.PI) / ((2 * Math.PI) / nTheta));
       sj %= nTheta;
       cellOf[kept] = ri * nTheta + sj;
-      segZ[kept] = z;
-      segCls[kept] = perClass[k];
+      zOf[kept] = z;
+      clsOf[kept] = perClass[k];
       kept++;
     }
     if (kept === 0) {
       // Nothing valid this scan: everything previously rendered frees instantly.
-      const preRendered = new Uint8Array(this.nCells);
-      this.renderedInto(preRendered);
-      for (let c = 0; c < this.nCells; c++) {
-        if (preRendered[c]) {
-          this.occupancy[c] = 0;
-          this.zMinState[c] = Infinity;
-          this.zMaxState[c] = -Infinity;
-          this.zMean[c] = 0;
-          this.dominant[c] = UNKNOWN;
-          this.traversability[c] = 0;
-        }
-      }
+      this.freeAllRendered();
       this.frame++;
       return 0;
     }
 
-    const preRendered = new Uint8Array(this.nCells);
-    this.renderedInto(preRendered);
+    // ---- counting sort by cell id (stable; histogram doubles as hit-test) ----
+    const hist = this.hist;
+    hist.fill(0, 0, this.nCells);
+    for (let k = 0; k < kept; k++) hist[cellOf[k]]++;
+    const cursor = this.cursor;
+    // exclusive prefix sum -> scatter offsets (stable sort)
+    cursor[0] = 0;
+    for (let c = 1; c < this.nCells; c++) cursor[c] = cursor[c - 1] + hist[c - 1];
+    const sorted = this.sortedIdx;
+    for (let k = 0; k < kept; k++) {
+      const cell = cellOf[k];
+      sorted[cursor[cell]++] = k;
+    }
 
-    // stable sort kept indices by cell id (mirrors argsort(cells, kind="stable"))
-    const idx = order.subarray(0, kept);
-    for (let k = 0; k < kept; k++) idx[k] = k;
-    sortIndicesByCell(idx, cellOf, kept);
-
-    // segment reduce: run boundaries of equal cell ids
+    // ---- segment reduce over unique cells ----
+    const C = nClasses;
+    const uCell = this.uCell;
+    const uZmin = this.uZmin;
+    const uZmax = this.uZmax;
+    const uZsum = this.uZsum;
+    const uCnt = this.uCnt;
+    const uClsCounts = this.uClsCounts;
     let nUniq = 0;
-    const uniqStart: number[] = []; // start offsets in sorted arrays
     for (let s = 0; s < kept; ) {
-      const cell = cellOf[idx[s]];
+      const cell = cellOf[sorted[s]];
       let e = s + 1;
-      while (e < kept && cellOf[idx[e]] === cell) e++;
-      uniqStart.push(s);
+      while (e < kept && cellOf[sorted[e]] === cell) e++;
+      let zmin = Infinity;
+      let zmax = -Infinity;
+      let zsum = 0;
+      const cBase = nUniq * C;
+      for (let c = 0; c < C; c++) uClsCounts[cBase + c] = 0;
+      for (let q = s; q < e; q++) {
+        const oi = sorted[q];
+        const z = zOf[oi];
+        if (z < zmin) zmin = z;
+        if (z > zmax) zmax = z;
+        zsum += z;
+        const c = clsOf[oi];
+        if (c < C) uClsCounts[cBase + c]++;
+      }
+      uCell[nUniq] = cell;
+      uZmin[nUniq] = zmin;
+      uZmax[nUniq] = zmax;
+      uZsum[nUniq] = zsum;
+      uCnt[nUniq] = e - s;
       nUniq++;
       s = e;
     }
 
-    // per-unique-cell stats
-    const clsCount = this.clsCount;
-    clsCount.fill(0, 0, nUniq * nClasses);
-    const uniqCells: number[] = new Array(nUniq);
-    const zminU = new Float32Array(nUniq);
-    const zmaxU = new Float32Array(nUniq);
-    const zsumU = new Float64Array(nUniq);
-    const cntU = new Int32Array(nUniq);
-    const domU = new Uint8Array(nUniq);
-
+    // ---- apply per-frame state (hits) ----
+    const gz = this.groundZ;
     const wZ = this.trav.weights[0];
     const wS = this.trav.weights[1];
     const wC = this.trav.weights[2];
@@ -261,57 +309,31 @@ export class LogPolarGrid {
     const zDen = this.trav.zDiffThresh * 2.5;
     const sDen = this.trav.slopeThresh;
     const clsScores = this.trav.classScores;
+    const dom = this.dominant;
 
     for (let u = 0; u < nUniq; u++) {
-      const s = uniqStart[u];
-      const e = u + 1 < nUniq ? uniqStart[u + 1] : kept;
-      const cell = cellOf[idx[s]];
-      uniqCells[u] = cell;
-      let zmin = Infinity;
-      let zmax = -Infinity;
-      let zsum = 0;
-      const cBase = u * nClasses;
-      for (let q = s; q < e; q++) {
-        const oi = idx[q];
-        const z = segZ[oi];
-        if (z < zmin) zmin = z;
-        if (z > zmax) zmax = z;
-        zsum += z;
-        const c = segCls[oi];
-        if (c < nClasses) clsCount[cBase + c]++;
-      }
-      const cnt = e - s;
-      cntU[u] = cnt;
-      zminU[u] = zmin;
-      zmaxU[u] = zmax;
-      zsumU[u] = zsum;
-
+      const cell = uCell[u];
+      const cnt = uCnt[u];
+      const zmax = uZmax[u];
+      this.occupancy[cell] = occGain;
+      this.zMean[cell] = uZsum[u] / cnt;
+      this.zMaxState[cell] = zmax;
       // majority class
+      const cBase = u * C;
       let bestC = 0;
       let bestN = -1;
-      for (let c = 0; c < nClasses; c++) {
-        const v = clsCount[cBase + c];
+      for (let c = 0; c < C; c++) {
+        const v = uClsCounts[cBase + c];
         if (v > bestN) {
           bestN = v;
           bestC = c;
         }
       }
-      domU[u] = bestC;
-    }
+      dom[cell] = bestC;
 
-    // apply precise state for hit cells
-    const isHit = new Uint8Array(this.nCells);
-    for (let u = 0; u < nUniq; u++) {
-      const cell = uniqCells[u];
-      this.occupancy[cell] = occGain;
-      isHit[cell] = 1;
-      this.dominant[cell] = domU[u];
-      this.zMean[cell] = zsumU[u] / cntU[u];
-      this.zMinState[cell] = zminU[u];
-      this.zMaxState[cell] = zmaxU[u];
-
+      // traversability (mirrors _apply_precise)
       if (this.trav.enabled) {
-        const heightU = zmaxU[u] - this.groundZ;
+        const heightU = zmax - gz;
         const hPos = heightU > 0 ? heightU : 0;
         let zScore = 1 - hPos / zDen;
         if (zScore < 0) zScore = 0;
@@ -319,141 +341,232 @@ export class LogPolarGrid {
         let slopeScore = 1 - Math.max(heightU - 0.15, 0) / sDen;
         if (slopeScore < 0) slopeScore = 0;
         else if (slopeScore > 1) slopeScore = 1;
-        const clsScore = domU[u] < clsScores.length ? clsScores[domU[u]] : 0;
-        let occScore = occGain;
-        if (occScore < 0) occScore = 0;
-        else if (occScore > 1) occScore = 1;
-        this.traversability[cell] = (wZ * zScore + wS * slopeScore + wC * clsScore + wO * occScore) / wSum;
+        const clsScore = bestC < clsScores.length ? clsScores[bestC] : 0;
+        this.traversability[cell] = (wZ * zScore + wS * slopeScore + wC * clsScore + wO * occGain) / wSum;
+      }
+
+      // incremental rendered-list maintenance
+      if (!this.inRendered[cell]) {
+        this.inRendered[cell] = 1;
+        this.renderedList[this.renderedCount++] = cell;
       }
     }
 
-    // instant free: previously rendered cells not hit this scan
-    let anyFree = false;
-    for (let c = 0; c < this.nCells; c++) {
-      if (preRendered[c] && !isHit[c]) {
-        this.occupancy[c] = 0;
-        anyFree = true;
+    // ---- instant free: previously rendered cells not hit this scan ----
+    // hist[cell] > 0 marks this scan's hits; walk the compact list in place.
+    let w = 0;
+    for (let q = 0; q < this.renderedCount; q++) {
+      const cell = this.renderedList[q];
+      if (hist[cell] > 0) {
+        this.renderedList[w++] = cell; // still hit: keep
+      } else {
+        this.inRendered[cell] = 0;
+        this.occupancy[cell] = 0;
+        this.zMaxState[cell] = -Infinity;
+        this.zMean[cell] = 0;
+        dom[cell] = UNKNOWN;
+        this.traversability[cell] = 0;
       }
     }
-    // clear height/class state for cells that left the rendered mask
-    if (anyFree) {
-      for (let c = 0; c < this.nCells; c++) {
-        if (preRendered[c] && !isHit[c]) {
-          this.zMinState[c] = Infinity;
-          this.zMaxState[c] = -Infinity;
-          this.zMean[c] = 0;
-          this.dominant[c] = UNKNOWN;
-          this.traversability[c] = 0;
-        }
-      }
-    }
+    this.renderedCount = w;
 
     this.frame++;
     return nUniq;
   }
 
-  /** Build the dashboard rows for the given flat cell ids. */
-  private rowsFor(ids: Int32Array | number[], count: number): CellRow[] {
-    const nTheta = this.params.nTheta;
-    const g = this.groundZ;
-    const rows: CellRow[] = new Array(count);
-    for (let k = 0; k < count; k++) {
-      const cell = ids[k];
-      const i = Math.floor(cell / nTheta);
-      const j = cell % nTheta;
-      rows[k] = [i, j, this.zMean[cell] - g, this.zMaxState[cell] - g, this.dominant[cell], this.occupancy[cell], this.traversability[cell]];
+  private freeAllRendered(): void {
+    for (let q = 0; q < this.renderedCount; q++) {
+      const cell = this.renderedList[q];
+      this.inRendered[cell] = 0;
+      this.occupancy[cell] = 0;
+      this.zMaxState[cell] = -Infinity;
+      this.zMean[cell] = 0;
+      this.dominant[cell] = UNKNOWN;
+      this.traversability[cell] = 0;
     }
-    return rows;
+    this.renderedCount = 0;
   }
 
-  /** Pure snapshot of all rendered cells (no sent-tracking mutation). */
-  computeSnapshot(): GridDelta {
-    const mask = new Uint8Array(this.nCells);
-    this.renderedInto(mask);
-    const ids: number[] = [];
-    for (let c = 0; c < this.nCells; c++) if (mask[c]) ids.push(c);
-    return { isSnap: true, frame: this.frame, rows: this.rowsFor(ids, ids.length), freed: [] };
+  /** Build the binary-packed patch rows for the given cell ids. */
+  private packRows(ids: Int32Array, count: number, rows: Float32Array, cls: Uint8Array): void {
+    const nTheta = this.params.nTheta;
+    const g = this.groundZ;
+    for (let k = 0; k < count; k++) {
+      const cell = ids[k];
+      const o6 = k * 6;
+      rows[o6] = Math.floor(cell / nTheta);
+      rows[o6 + 1] = cell % nTheta;
+      rows[o6 + 2] = this.zMean[cell] - g;
+      rows[o6 + 3] = this.zMaxState[cell] - g;
+      rows[o6 + 4] = this.occupancy[cell];
+      rows[o6 + 5] = this.traversability[cell];
+      cls[k] = this.dominant[cell];
+    }
+  }
+
+  /** Pure snapshot of all rendered cells as a packed binary patch (no mutation). */
+  computeSnapshot(): PackedPatch {
+    const rows = new Float32Array(this.renderedCount * 6);
+    const cls = new Uint8Array(this.renderedCount);
+    this.packRows(this.renderedList, this.renderedCount, rows, cls);
+    // commit() for snapshots only reads the rendered list, but keep the ids
+    // fields populated for a uniform interface.
+    const upIds = new Int32Array(this.renderedCount);
+    upIds.set(this.renderedList.subarray(0, this.renderedCount));
+    return {
+      isSnap: true,
+      frame: this.frame,
+      rows,
+      cls,
+      freed: new Float32Array(0),
+      upIds,
+      upCount: this.renderedCount,
+      freedIds: new Int32Array(0),
+      freedCount: 0,
+    };
   }
 
   /**
-   * Pure delta since the last commit: added cells, freed cells, and cells whose
-   * z_max moved >= 5 cm or whose dominant class changed.
+   * Pure delta since the last commit: added cells, freed cells, and cells
+   * whose z_max moved >= 5 cm or whose dominant class changed. Packed binary.
    */
-  computeDelta(): GridDelta {
-    const mask = new Uint8Array(this.nCells);
-    this.renderedInto(mask);
-    const ids: number[] = [];
-    const freed: [number, number][] = [];
+  computeDelta(): PackedPatch {
+    const list = this.renderedList;
+    const live = this.renderedCount;
+
+    // pass 1: count upserts (added or changed) and frees
+    let nUps = 0;
+    let nFree = 0;
+    for (let q = 0; q < live; q++) {
+      const cell = list[q];
+      if (!this.wasSent[cell]) nUps++; // added
+      else if (Math.abs(this.zMaxState[cell] - this.sentZmax[cell]) >= 0.05 || this.dominant[cell] !== this.sentCls[cell]) nUps++; // changed
+    }
+    const prev = this.prevSentList;
+    for (let q = 0; q < this.prevSentCount; q++) {
+      if (!this.inRendered[prev[q]]) nFree++;
+    }
+
+    // pass 2: collect upsert ids + freed ids (worker-side, survive transfer)
+    const upIds = new Int32Array(nUps);
+    let k = 0;
+    for (let q = 0; q < live; q++) {
+      const cell = list[q];
+      const added = !this.wasSent[cell];
+      const changed =
+        !added &&
+        (Math.abs(this.zMaxState[cell] - this.sentZmax[cell]) >= 0.05 || this.dominant[cell] !== this.sentCls[cell]);
+      if (added || changed) upIds[k++] = cell;
+    }
+    const rows = new Float32Array(nUps * 6);
+    const cls = new Uint8Array(nUps);
+    this.packRows(upIds, nUps, rows, cls);
+
+    const freed = new Float32Array(nFree * 2);
+    const freedIds = new Int32Array(nFree);
     const nTheta = this.params.nTheta;
-    for (let c = 0; c < this.nCells; c++) {
-      const m = mask[c];
-      const prev = this.prevRendered[c];
-      if (m && !prev) {
-        ids.push(c); // added
-      } else if (m) {
-        const dz = Math.abs(this.zMaxState[c] - this.sentZmax[c]);
-        if (dz >= 0.05 || this.dominant[c] !== this.sentCls[c]) ids.push(c); // changed
-      } else if (prev) {
-        freed.push([Math.floor(c / nTheta), c % nTheta]);
+    let f = 0;
+    let g = 0;
+    for (let q = 0; q < this.prevSentCount; q++) {
+      const cell = prev[q];
+      if (!this.inRendered[cell]) {
+        freedIds[g++] = cell;
+        freed[f++] = Math.floor(cell / nTheta);
+        freed[f++] = cell % nTheta;
       }
     }
-    return { isSnap: false, frame: this.frame, rows: this.rowsFor(ids, ids.length), freed };
+    return { isSnap: false, frame: this.frame, rows, cls, freed, upIds, upCount: nUps, freedIds, freedCount: nFree };
   }
 
   /** Apply sent-tracking after the frame was actually delivered. */
-  commit(delta: GridDelta): void {
-    if (delta.isSnap) {
-      const mask = new Uint8Array(this.nCells);
-      this.renderedInto(mask);
-      this.prevRendered = mask;
-      for (let c = 0; c < this.nCells; c++) {
-        if (mask[c]) {
-          this.sentZmax[c] = this.zMaxState[c];
-          this.sentCls[c] = this.dominant[c];
-        } else {
-          this.sentZmax[c] = 0;
-          this.sentCls[c] = UNKNOWN;
-        }
+  commit(patch: PackedPatch): void {
+    if (patch.isSnap) {
+      // 1) clear wasSent for cells that left since the last committed mask
+      //    (walk the OLD prev list BEFORE replacing it).
+      for (let q = 0; q < this.prevSentCount; q++) {
+        const cell = this.prevSentList[q];
+        if (!this.inRendered[cell]) this.wasSent[cell] = 0;
       }
-    } else {
-      const mask = new Uint8Array(this.nCells);
-      this.renderedInto(mask);
-      this.prevRendered = mask;
-      for (const row of delta.rows) {
-        const cell = row[0] * this.params.nTheta + row[1];
+      // 2) the new committed mask is exactly the rendered list
+      if (this.prevSentList.length < this.renderedCount) {
+        this.prevSentList = new Int32Array(Math.max(1024, this.renderedCount * 2));
+      }
+      this.prevSentList.set(this.renderedList.subarray(0, this.renderedCount));
+      this.prevSentCount = this.renderedCount;
+      for (let q = 0; q < this.renderedCount; q++) {
+        const cell = this.renderedList[q];
+        this.wasSent[cell] = 1;
         this.sentZmax[cell] = this.zMaxState[cell];
         this.sentCls[cell] = this.dominant[cell];
       }
-      const nTheta = this.params.nTheta;
-      for (const [i, j] of delta.freed) {
-        const cell = i * nTheta + j;
-        this.sentZmax[cell] = 0;
-        this.sentCls[cell] = UNKNOWN;
+      return;
+    }
+
+    // delta path: freed cells leave the mask, upsert cells join/update it.
+    // Reads the worker-side id lists (transport buffers may be detached).
+    // 1) stamp freed membership (O(nFree), no clears)
+    this.freeStampValue++;
+    const stamp = this.freeStamp;
+    const stampV = this.freeStampValue;
+    const freedIds = patch.freedIds;
+    for (let k = 0; k < patch.freedCount; k++) {
+      stamp[freedIds[k]] = stampV;
+    }
+    // 2) compact the old prev list in place, dropping freed cells
+    let w = 0;
+    for (let q = 0; q < this.prevSentCount; q++) {
+      const cell = this.prevSentList[q];
+      if (stamp[cell] === stampV) {
+        this.wasSent[cell] = 0; // left the mask
+      } else {
+        this.prevSentList[w++] = cell;
       }
     }
+    const keptPrev = w;
+    // 3) append added upsert cells + refresh sent state for all upserts
+    const upIds = patch.upIds;
+    const nUps = patch.upCount;
+    let need = keptPrev;
+    for (let k = 0; k < nUps; k++) {
+      if (!this.wasSent[upIds[k]]) need++;
+    }
+    if (this.prevSentList.length < need) {
+      const grown = new Int32Array(Math.max(1024, need * 2));
+      grown.set(this.prevSentList.subarray(0, keptPrev));
+      this.prevSentList = grown;
+    }
+    for (let k = 0; k < nUps; k++) {
+      const cell = upIds[k];
+      if (!this.wasSent[cell]) {
+        this.wasSent[cell] = 1;
+        this.prevSentList[w++] = cell;
+      }
+      this.sentZmax[cell] = this.zMaxState[cell];
+      this.sentCls[cell] = this.dominant[cell];
+    }
+    this.prevSentCount = w;
   }
 
   /** Full reset (seek / restart). */
   reset(): void {
     this.zMean.fill(0);
-    this.zMinState.fill(Infinity);
     this.zMaxState.fill(-Infinity);
     this.dominant.fill(UNKNOWN);
     this.occupancy.fill(0);
     this.traversability.fill(0);
-    this.prevRendered = new Uint8Array(this.nCells);
+    this.renderedCount = 0;
+    this.inRendered.fill(0);
+    this.wasSent.fill(0);
     this.sentZmax.fill(0);
     this.sentCls.fill(UNKNOWN);
+    this.prevSentCount = 0;
     this.frame = 0;
     this.groundZ = 0;
   }
 
-  /** Rendered-cell count (occupancy above threshold). */
-  renderedCount(): number {
-    let c = 0;
-    const t = this.params.occThreshold;
-    for (let i = 0; i < this.nCells; i++) if (this.occupancy[i] > t) c++;
-    return c;
+  /** Rendered-cell count. */
+  get liveCount(): number {
+    return this.renderedCount;
   }
 
   get bytesPerCell(): number {
@@ -461,7 +574,7 @@ export class LogPolarGrid {
   }
 
   memoryReport(): { gridKb: number; renderedCells: number; nCells: number; compressionRatio: number; uniformMb: number } {
-    const rendered = this.renderedCount();
+    const rendered = this.renderedCount;
     // uniform equivalent (grid.yaml memory block)
     const uniformCells = Math.pow(200 / 0.05, 2);
     const uniformBytes = uniformCells * this.bytesPerCell;
@@ -475,14 +588,7 @@ export class LogPolarGrid {
   }
 }
 
-/** Stable index sort by cell id (Array.prototype.sort is stable per ES2019+,
- *  matching numpy's kind="stable" argsort semantics). */
-function sortIndicesByCell(idx: Int32Array, cellOf: Int32Array, kept: number): void {
-  const arr = Array.from(idx.subarray(0, kept));
-  arr.sort((a, b) => cellOf[a] - cellOf[b]);
-  for (let k = 0; k < kept; k++) idx[k] = arr[k];
-}
-
+/** numpy.percentile(x, 20) with linear interpolation. */
 function percentile20(values: Float32Array, n: number): number {
   const sorted = Array.from(values.subarray(0, n));
   sorted.sort((a, b) => a - b);
