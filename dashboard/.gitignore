@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# copied at build time from node_modules/onnxruntime-web (never committed)
+/public/ort/

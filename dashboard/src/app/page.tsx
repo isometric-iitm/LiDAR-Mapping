@@ -9,6 +9,7 @@ import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import { Compass, Refresh } from "iconoir-react";
 import MetricsPanel, { type ViewMode } from "@/components/MetricsPanel";
 import Timeline from "@/components/Timeline";
+import ClientEngineLoader from "@/components/ClientEngineLoader";
 import { CLASSES } from "@/lib/colors";
 import {
   CellLayer,
@@ -20,7 +21,7 @@ import {
   EgoMarker,
   type CellInfo,
 } from "@/components/MapScene";
-import { useMapStream } from "@/lib/useMapStream";
+import { useClientEngine } from "@/lib/engine/useClientEngine";
 import { computeRingEdges } from "@/lib/gridGeometry";
 
 type CamMode = "persp" | "ortho" | "top";
@@ -125,8 +126,6 @@ function hoverInfo(cell: CellInfo, gridEdges: number[], nTheta: number): {
 
 type SeqInfo = { id: string; frames: number; has_poses: boolean; has_labels: boolean };
 
-const API = process.env.NEXT_PUBLIC_PC2D_API ?? "http://localhost:8000";
-
 export default function Home() {
   const {
     meta,
@@ -143,10 +142,13 @@ export default function Home() {
     send,
     seqId,
     switchSequence,
-    status,
     statusMsg,
     buffering,
-  } = useMapStream();
+    webgpuUnsupported,
+    initializing,
+    download,
+    error,
+  } = useClientEngine();
   const [paused, setPaused] = useState(true);
   const [speed, setSpeed] = useState(1);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
@@ -154,7 +156,7 @@ export default function Home() {
   const [hover, setHover] = useState<ReturnType<typeof hoverInfo> | null>(null);
   const [camMode, setCamMode] = useState<CamMode>("persp");
   const [animTarget, setAnimTarget] = useState<{ pos: THREE.Vector3; look: THREE.Vector3 } | null>(null);
-  const [availableSeqs, setAvailableSeqs] = useState<SeqInfo[]>([]);
+  const [availableSeqs] = useState<SeqInfo[]>([]);
 
   // client-side perf tracking (wired to PerfOverlay + sidebar FPS)
   const [clientFps, setClientFps] = useState(0);
@@ -220,13 +222,6 @@ export default function Home() {
     if (needsCloud && !cloudOn) setCloudOn(true);
     else if (!needsCloud && cloudOn) setCloudOn(false);
   };
-
-  useEffect(() => {
-    fetch(`${API}/sequences`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(r.statusText)))
-      .then((data) => setAvailableSeqs(data.sequences ?? []))
-      .catch(() => {});
-  }, []);
 
   const showCloud = viewMode === "seg" || viewMode === "raw" || viewMode === "compare";
   const gridOpacity = viewMode === "compare" ? 0.35 : 1;
@@ -305,16 +300,23 @@ export default function Home() {
             )}
           </Canvas>
 
-          {/* -- Loading / buffering overlay -------------------------------- */}
-          {buffering && (
-            <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center bg-black/60 backdrop-blur-[2px]">
-              <div className="frost flex flex-col items-center gap-3 px-6 py-5">
-                <Refresh className="h-6 w-6 animate-spin text-cyan-400" />
-                <div className="text-sm font-medium text-zinc-100">{statusMsg ?? (status === "loading" ? "Loading model\u2026" : "Buffering first frame\u2026")}</div>
+          {/* -- Loading / engine boot overlay -------------------------------- */}
+          <ClientEngineLoader
+            initializing={initializing || (buffering && cellCount === 0)}
+            statusMsg={statusMsg}
+            download={download}
+            webgpuUnsupported={webgpuUnsupported}
+            error={error}
+          />
+          {buffering && cellCount > 0 && (
+            <div className="pointer-events-none absolute inset-x-0 top-16 z-10 flex justify-center">
+              <div className="frost flex items-center gap-2 px-4 py-2 text-xs text-zinc-300">
+                <Refresh className="h-3.5 w-3.5 animate-spin text-cyan-400" />
+                {statusMsg ?? "Buffering…"}
               </div>
             </div>
           )}
-          {!buffering && cellCount === 0 && meta && (
+          {!buffering && cellCount === 0 && meta && !initializing && (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
               <div className="frost px-4 py-2 text-xs text-zinc-400">Press Play to start</div>
             </div>

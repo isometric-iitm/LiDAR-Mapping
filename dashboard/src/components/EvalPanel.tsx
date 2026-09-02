@@ -1,8 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import { Refresh, StatsReport } from "iconoir-react";
+import { StatsReport } from "iconoir-react";
 import {
   Bar,
   BarChart,
@@ -16,7 +15,9 @@ import {
   YAxis,
 } from "recharts";
 
-const API = process.env.NEXT_PUBLIC_PC2D_API ?? "http://localhost:8000";
+/* Baked at build time by scripts/copy-assets.mjs from the latest
+ * results/eval_*.json (no API server involved in this static-only branch). */
+import evalDataRaw from "../../public/metrics/eval.json";
 
 type ClassIou = Record<string, number>;
 type Band = Record<string, { miou: number; class_ious: ClassIou }>;
@@ -84,7 +85,6 @@ function Card({ label, value, sub }: { label: string; value: string; sub?: strin
 function Loading({ label }: { label: string }) {
   return (
     <div className="mx-auto flex max-w-6xl items-center gap-2 px-6 py-8 text-sm text-zinc-400">
-      <Refresh className="h-4 w-4 animate-spin" strokeWidth={2} />
       <span>{label}</span>
     </div>
   );
@@ -177,40 +177,20 @@ function BandChart({ title, data, color }: { title: string; data: { name: string
 }
 
 export default function EvalPanel() {
-  const [data, setData] = useState<EvalResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  /* {} placeholder written by copy-assets when no eval exists yet. */
+  const data = (Object.keys(evalDataRaw).length > 0 ? evalDataRaw : null) as EvalResult | null;
 
-  useEffect(() => {
-    fetch(`${API}/metrics/eval`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((j) => {
-        if (j && j.error) throw new Error(j.error);
-        setData(j);
-      })
-      .catch((e) => setError(String(e)))
-      .finally(() => setLoading(false));
-  }, []);
+  /* data is a build-time constant; plain derivation, no memo needed. */
+  const pixelBars4 = data?.pixel ? classRows(data.pixel.class_ious_4) : [];
+  const pixelBars5 = data?.pixel ? classRows(data.pixel.class_ious_5) : [];
+  const pointBars4 = data?.point ? classRows(data.point.class_ious_4) : [];
+  const pointBars5 = data?.point ? classRows(data.point.class_ious_5) : [];
+  const pixelBands = data?.pixel ? bandRows(data.pixel.per_distance_band_4class) : [];
+  const pointBands = data?.point ? bandRows(data.point.per_distance_band_4class) : [];
 
-  const pixelBars4 = useMemo(() => (data?.pixel ? classRows(data.pixel.class_ious_4) : []), [data]);
-  const pixelBars5 = useMemo(() => (data?.pixel ? classRows(data.pixel.class_ious_5) : []), [data]);
-  const pointBars4 = useMemo(() => (data?.point ? classRows(data.point.class_ious_4) : []), [data]);
-  const pointBars5 = useMemo(() => (data?.point ? classRows(data.point.class_ious_5) : []), [data]);
-  const pixelBands = useMemo(() => (data?.pixel ? bandRows(data.pixel.per_distance_band_4class) : []), [data]);
-  const pointBands = useMemo(() => (data?.point ? bandRows(data.point.per_distance_band_4class) : []), [data]);
-
-  if (loading) return <Loading label="Loading evaluation" />;
-  if (error)
-    return (
-      <div className="mx-auto max-w-6xl px-6 py-8 text-sm text-rose-400">
-        Failed to load eval results: {error}
-      </div>
-    );
   if (!data?.pixel && !data?.point)
     return (
-      <div className="mx-auto max-w-6xl px-6 py-8 text-sm text-zinc-400">
-        No eval results found (run eval/run_evaluation.py first).
-      </div>
+      <Loading label="No eval results recorded yet (run eval/run_evaluation.py, then rebuild)." />
     );
 
   const ts = data.timestamp ? new Date(data.timestamp).toLocaleString() : "-";

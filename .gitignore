@@ -35,3 +35,8 @@ dashboard/node_modules/
 # ONNX CPU export (weights split into external *.onnx.data blob)
 *.onnx
 *.onnx.data
+
+# In-browser demo branch (static-demo): committed browser assets.
+# The packed demo model + sequence chunks live in dashboard/public/demo/ and
+# are intentionally versioned there (self-contained Cloudflare Pages deploy).
+!dashboard/public/demo/**/*.onnx

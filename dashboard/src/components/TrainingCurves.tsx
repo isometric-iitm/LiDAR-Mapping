@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
 import {
   CartesianGrid,
   Legend,
@@ -12,7 +11,11 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { DashboardSpeed, Refresh } from "iconoir-react";
+import { DashboardSpeed } from "iconoir-react";
+
+/* Baked at build time by scripts/copy-assets.mjs from checkpoints/history.jsonl
+ * (repo-relative; no API server involved in this static-only demo branch). */
+import historyData from "../../public/metrics/history.json";
 
 type HistoryEntry = {
   step: number;
@@ -24,7 +27,7 @@ type HistoryEntry = {
   class_ious_5: Record<string, number>;
 };
 
-const API = process.env.NEXT_PUBLIC_PC2D_API ?? "http://localhost:8000";
+const data = historyData as HistoryEntry[];
 
 const METRIC_SERIES = [
   { key: "miou_4class", label: "mIoU (4-class)", color: "#22c55e", axis: "iou" as const },
@@ -153,61 +156,29 @@ function PerClassChart({ rows }: { rows: Record<string, number | undefined>[] })
 }
 
 export default function TrainingCurves() {
-  const [data, setData] = useState<HistoryEntry[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  /* data is a build-time constant; plain derivation, no memo needed.
+   * Dedupe history.jsonl to the most recent record per step (same step logged once per epoch). */
+  const byStep = new Map<number, HistoryEntry>();
+  for (const e of data) byStep.set(e.step, e);
+  const series = [...byStep.values()].sort((a, b) => a.step - b.step);
 
-  useEffect(() => {
-    fetch(`${API}/metrics/history`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((rows) => setData(rows))
-      .catch((e) => setError(String(e)))
-      .finally(() => setLoading(false));
-  }, []);
+  const metricRows = series.map((e) => ({
+    step: e.step,
+    "mIoU (4-class)": e.miou_4class,
+    "mIoU (5-class)": e.miou_5class,
+    "val loss": e.val_loss,
+  }));
 
-  /* Dedupe history.jsonl to the most recent record per step (same step logged once per epoch). */
-  const series = useMemo(() => {
-    const byStep = new Map<number, HistoryEntry>();
-    for (const e of data) byStep.set(e.step, e);
-    return [...byStep.values()].sort((a, b) => a.step - b.step);
-  }, [data]);
+  const perClassRows = series.map((e) => {
+    const row: Record<string, number | undefined> = { step: e.step };
+    for (const s of PER_CLASS) row[s.label] = (e.class_ious_4?.[s.key] ?? 0) * 100;
+    return row;
+  });
 
-  const metricRows = useMemo(
-    () =>
-      series.map((e) => ({
-        step: e.step,
-        "mIoU (4-class)": e.miou_4class,
-        "mIoU (5-class)": e.miou_5class,
-        "val loss": e.val_loss,
-      })),
-    [series]
-  );
-
-  const perClassRows = useMemo(
-    () =>
-      series.map((e) => {
-        const row: Record<string, number | undefined> = { step: e.step };
-        for (const s of PER_CLASS) row[s.label] = (e.class_ious_4?.[s.key] ?? 0) * 100;
-        return row;
-      }),
-    [series]
-  );
-
-  if (loading)
-    return (
-      <div className="mx-auto flex max-w-6xl items-center gap-2 px-6 py-8 text-sm text-zinc-400">
-        <Refresh className="h-4 w-4 animate-spin" strokeWidth={2} />
-        <span>Loading training history</span>
-      </div>
-    );
-  if (error)
-    return (
-      <div className="mx-auto max-w-6xl px-6 py-8 text-sm text-rose-400">Failed: {error}</div>
-    );
   if (!data.length)
     return (
       <div className="mx-auto max-w-6xl px-6 py-8 text-sm text-zinc-400">
-        No history available (start the server / check ckpt_dir).
+        No training history available yet.
       </div>
     );
 

@@ -123,15 +123,19 @@ export default function Timeline({ seqPos, seqLen, paused, speed, seeking, buffe
       <select
         value={seqId}
         onChange={(e) => onSwitchSeq(e.target.value)}
-        disabled={seeking}
+        disabled={seeking || availableSeqs.length === 0}
         className="shrink-0 rounded-[4px] bg-zinc-800 px-2 py-1 font-mono text-xs text-zinc-300 outline-none transition-colors hover:bg-zinc-700 focus:ring-1 focus:ring-zinc-500 disabled:cursor-wait disabled:opacity-60"
         title="Sequence"
       >
-        {availableSeqs.map((s) => (
-          <option key={s.id} value={s.id}>
-            Seq {s.id}
-          </option>
-        ))}
+        {availableSeqs.length > 0 ? (
+          availableSeqs.map((s) => (
+            <option key={s.id} value={s.id}>
+              Seq {s.id}
+            </option>
+          ))
+        ) : (
+          <option value={seqId}>Seq {seqId || "demo"}</option>
+        )}
       </select>
       <select
         value={speed}
