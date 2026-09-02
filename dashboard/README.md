@@ -23,7 +23,7 @@ Real-time 3D semantic map viewer and training curves for the PC2D LiDAR mapping 
 - **Compare mode** - segmented and raw clouds overlaid simultaneously
 - **Playback controls** - pause, seek, speed (0.5x-5x), with heading-up camera convention
 - **Live metrics** - FPS, per-stage latency (segment / project / forward / grid / pack / cloud), memory
-- **Memory comparison** - side-by-side bars: log-polar grid (~220 KB) vs uniform 5 cm grid (~1.6 GB)
+- **Memory comparison** - side-by-side bars: log-polar grid (~19 MB) vs uniform 5 cm grid (~656 MB)
 - **Cell hover inspection** - class, height, occupancy %, dynamic score, range, bearing
 - **Training curves** - mIoU (4-class, 5-class), validation loss, per-class IoU over training steps
 - **Evaluation** - pixel + point level mIoU, per-class IoU, per-distance-band mIoU, latency, memory

@@ -30,7 +30,7 @@ Real-time semantic segmentation of LiDAR point clouds projected onto a **variabl
 | **mIoU 4-class** | **75.8%** | **65.3%** |
 | **mIoU 5-class** | 63.3% | 52.6% |
 | Latency | 59.6 ms/scan | ~243 ms/scan |
-| Throughput | ~19 Hz | ~4.1 Hz |
+| Throughput | ~17 Hz | ~4.1 Hz |
 
 ### Per-class IoU (4-class, GPU)
 
@@ -38,8 +38,8 @@ Real-time semantic segmentation of LiDAR point clouds projected onto a **variabl
 |-------|:-----:|:-----:|
 | Drivable | 84.6% | 81.1% |
 | Terrain / Non-drivable | 85.4% | 82.4% |
-| Static Obstacle | 68.5% | 65.7% |
-| Dynamic Object | 85.2% | 73.9% |
+| Static Obstacle | 68.5% | 65.8% |
+| Dynamic Object | 85.2% | 73.8% |
 
 ### Per-distance-band mIoU (4-class, GPU pixel-level)
 
@@ -58,21 +58,21 @@ Real-time semantic segmentation of LiDAR point clouds projected onto a **variabl
 
 | Band | Pixel | Point |
 |------|:-----:|:-----:|
-| 0-5 m | 80.7% | 74.7% |
+| 0-5 m | 80.7% | 74.6% |
 | 5-10 m | 82.7% | 77.7% |
-| 10-20 m | 79.2% | 74.6% |
-| 20-40 m | 68.6% | 62.8% |
+| 10-20 m | 79.2% | 74.7% |
+| 20-40 m | 68.6% | 63.0% |
 | 40-80 m | 55.7% | 50.3% |
 
 **5-class**
 
 | Band | Pixel | Point |
 |------|:-----:|:-----:|
-| 0-5 m | 72.0% | 61.8% |
-| 5-10 m | 70.3% | 62.4% |
-| 10-20 m | 65.7% | 56.1% |
-| 20-40 m | 56.3% | 44.3% |
-| 40-80 m | 38.4% | 31.7% |
+| 0-5 m | 69.3% | 64.0% |
+| 5-10 m | 70.1% | 65.7% |
+| 10-20 m | 65.8% | 62.0% |
+| 20-40 m | 56.7% | 51.8% |
+| 40-80 m | 44.8% | 40.6% |
 
 ![Confusion matrices](results/confusion_matrices.png)
 
@@ -82,8 +82,8 @@ Real-time semantic segmentation of LiDAR point clouds projected onto a **variabl
 
 | Grid type | Cell size | Cell count | Memory |
 |-----------|-----------|------------|--------|
-| Uniform 5 cm | 0.05 m x 0.05 m | ~16 million | ~784 MB |
-| **Log-polar (ours)** | 5 cm -> 50 cm | ~469K | **~22 MB** |
+| Uniform 5 cm | 0.05 m x 0.05 m | ~16 million | ~656 MB |
+| **Log-polar (ours)** | 5 cm -> 50 cm | ~469K | **~19 MB** |
 
 <!-- RESULTS_END -->
 
@@ -211,7 +211,7 @@ pc2d/
 │   │   ├── lovasz.py         # CombinedLoss (CE + Lovasz-Softmax)
 │   │   └── predict.py        # Segmenter (end-to-end: project -> forward -> KNN)
 │   ├── grid_engine/
-│   │   ├── logpolar_grid.py  # LogPolarGrid (~469K cells, ~22 MB, two-phase, pure-delta, JIT-accelerated reduce)
+│   │   ├── logpolar_grid.py  # LogPolarGrid (~469K cells, ~19 MB, two-phase, pure-delta, JIT-accelerated reduce)
 │   │   └── jit_reduce.py     # numba fused per-cell scatter-reduce (min/max/sum/count/class)
 │   └── server/
 │       ├── app.py            # FastAPI + two-stage Pipeline (SEG thread + GRID thread) + WS endpoints
