@@ -205,37 +205,34 @@ export class LogPolarGrid {
   /**
    * Frame update — port of update(points, per_class) + _apply_precise +
    * _clear_freed, with counting sort + incremental rendered-list maintenance.
+   * thetas/planarRs come from the projector slot (computed once, reused here).
    */
-  update(points: Float32Array, perClass: Uint8Array, n: number): number {
+  update(points: Float32Array, perClass: Uint8Array, n: number, thetas: Float64Array, planarRs: Float64Array): number {
     const { rMin, rMax, zMin, zMax, nTheta, nClasses, occGain } = this.params;
 
     // ---- per-frame ground reference (20th percentile of near z) ----
     let nearCount = 0;
     const nearZ = this.nearZ;
     for (let k = 0; k < n; k++) {
-      const x = points[k * 4];
-      const y = points[k * 4 + 1];
       const z = points[k * 4 + 2];
-      const r2 = x * x + y * y; // 1.5^2=2.25, 15^2=225 (sqrt-free)
+      const r2 = planarRs[k] * planarRs[k]; // 1.5^2=2.25, 15^2=225 (sqrt-free)
       if (r2 > 2.25 && r2 < 225 && z > -8 && z < 4 && nearCount < nearZ.length) {
         nearZ[nearCount++] = z;
       }
     }
     if (nearCount >= 128) this.groundZ = percentile20(nearZ, nearCount);
 
-    // ---- polar coords + keep mask + cell ids (single pass) ----
+    // ---- cell ids (keep mask; theta/r reused from the projector pass) ----
     let kept = 0;
     const cellOf = this.cellOf;
     const zOf = this.zOf;
     const clsOf = this.clsOf;
     for (let k = 0; k < n; k++) {
-      const x = points[k * 4];
-      const y = points[k * 4 + 1];
+      const r = planarRs[k];
       const z = points[k * 4 + 2];
-      const r = Math.hypot(x, y);
       if (r < rMin || r > rMax || z < zMin || z > zMax) continue;
       const ri = this.ringIndex(r);
-      let sj = Math.floor((Math.atan2(y, x) + Math.PI) / ((2 * Math.PI) / nTheta));
+      let sj = Math.floor((thetas[k] + Math.PI) / ((2 * Math.PI) / nTheta));
       sj %= nTheta;
       cellOf[kept] = ri * nTheta + sj;
       zOf[kept] = z;
@@ -588,14 +585,42 @@ export class LogPolarGrid {
   }
 }
 
-/** numpy.percentile(x, 20) with linear interpolation. */
+/** numpy.percentile(x, 20) with linear interpolation (quickselect nth element). */
 function percentile20(values: Float32Array, n: number): number {
+  // exact nth_element (quickselect) on a copy; identical result to sort+interp
   const sorted = Array.from(values.subarray(0, n));
-  sorted.sort((a, b) => a - b);
-  if (n === 1) return sorted[0];
   const rank = (n - 1) * 0.2;
   const lo = Math.floor(rank);
   const hi = Math.ceil(rank);
-  if (lo === hi) return sorted[lo];
-  return sorted[lo] + (sorted[hi] - sorted[lo]) * (rank - lo);
+  if (lo === hi) return quickselect(sorted, lo);
+  const a = quickselect(sorted, lo);
+  // for hi = lo + 1, quickselect of hi leaves sorted[hi] as the next smallest
+  const b = quickselect(sorted, hi);
+  return a + (b - a) * (rank - lo);
+}
+
+/** Hoare-partition quickselect: reorders v so v[k] is the k-th smallest. */
+function quickselect(v: number[], k: number): number {
+  let lo = 0;
+  let hi = v.length - 1;
+  while (lo < hi) {
+    const pivot = v[(lo + hi) >> 1];
+    let i = lo;
+    let j = hi;
+    while (i <= j) {
+      while (v[i] < pivot) i++;
+      while (v[j] > pivot) j--;
+      if (i <= j) {
+        const t = v[i];
+        v[i] = v[j];
+        v[j] = t;
+        i++;
+        j--;
+      }
+    }
+    if (k <= j) hi = j;
+    else if (k >= i) lo = i;
+    else break;
+  }
+  return v[k];
 }

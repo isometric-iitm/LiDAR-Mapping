@@ -11,6 +11,12 @@
  *   - floor-then-clamp to [0, h-1] / [0, w-1]
  *   - r = max(||p||, 1e-6)
  *   - nearest-wins per pixel (Python: descending-range argsort write order)
+ *
+ * Buffers are double-buffered (ping-pong): the engine pipeline starts frame
+ * k's GPU inference from one slot while frame k-1's CPU stages still read the
+ * other, so no stage ever overwrites data a pending frame depends on. The
+ * slot also carries the per-point polar values (theta, planar radius) the
+ * grid needs — computed here once instead of recomputed by the grid.
  */
 
 export interface ProjectorOptions {
@@ -21,6 +27,19 @@ export interface ProjectorOptions {
   maxRange: number;
 }
 
+export interface ProjectorSlot {
+  /** (maxPoints, 4) xyzi — filled by the frame reader, read by project/grid */
+  points: Float32Array;
+  /** CHW (5, h, w) model input image */
+  image: Float32Array;
+  /** (maxPoints, 2) (row, col) per point */
+  proj: Int32Array;
+  /** (maxPoints,) atan2(y, x) per point — reused by the grid */
+  thetas: Float64Array;
+  /** (maxPoints,) hypot(x, y) per point — reused by the grid */
+  planarRs: Float64Array;
+}
+
 export class RangeProjector {
   readonly h: number;
   readonly w: number;
@@ -28,11 +47,8 @@ export class RangeProjector {
   private readonly fovTop: number;
   private readonly fovBottom: number;
   private readonly fov: number;
-
-  /** CHW (5,h,w) output image, reused across frames. */
-  readonly image: Float32Array;
-  /** Per-point (row, col), capacity maxPoints*2. */
-  readonly proj: Int32Array;
+  private readonly slots: [ProjectorSlot, ProjectorSlot];
+  private slotIdx = 0;
   /** Scratch: nearest range per pixel for the nearest-wins rule. */
   private readonly minRange: Float32Array;
 
@@ -43,17 +59,31 @@ export class RangeProjector {
     this.fovTop = (opts.fovTopDeg * Math.PI) / 180;
     this.fovBottom = (opts.fovBottomDeg * Math.PI) / 180;
     this.fov = this.fovTop - this.fovBottom;
-    this.image = new Float32Array(5 * this.h * this.w);
-    this.proj = new Int32Array(Math.max(1, maxPoints) * 2);
+    const mk = (): ProjectorSlot => ({
+      points: new Float32Array(maxPoints * 4),
+      image: new Float32Array(5 * this.h * this.w),
+      proj: new Int32Array(maxPoints * 2),
+      thetas: new Float64Array(maxPoints),
+      planarRs: new Float64Array(maxPoints),
+    });
+    this.slots = [mk(), mk()];
     this.minRange = new Float32Array(this.h * this.w);
   }
 
+  /** Flip to the next buffer set and return it. Call once per frame. */
+  beginFrame(): ProjectorSlot {
+    const s = this.slots[this.slotIdx];
+    this.slotIdx ^= 1;
+    return s;
+  }
+
   /**
-   * Project `points` (n*4 flat xyzi) into the range image.
-   * Returns the point count; `image` and `proj` are the reused buffers.
+   * Project `slot.points` (n*4 flat xyzi) into the range image.
+   * Writes image/proj and records thetas/planarRs for the grid.
    */
-  project(points: Float32Array, n: number): number {
-    const { h, w, image, proj, minRange, maxRange } = this;
+  project(slot: ProjectorSlot, n: number): void {
+    const { h, w, minRange, maxRange } = this;
+    const { points, image, proj, thetas, planarRs } = slot;
     const fovBottom = this.fovBottom;
     const fov = this.fov;
     const hw = h * w;
@@ -85,6 +115,8 @@ export class RangeProjector {
 
       proj[k * 2] = row;
       proj[k * 2 + 1] = col;
+      thetas[k] = Math.atan2(y, x);
+      planarRs[k] = Math.hypot(x, y);
 
       const cell = row * w + col;
       if (r < minRange[cell]) {
@@ -96,6 +128,5 @@ export class RangeProjector {
         image[chRem + cell] = rem;
       }
     }
-    return n;
   }
 }

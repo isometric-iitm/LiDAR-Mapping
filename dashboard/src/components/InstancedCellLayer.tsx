@@ -13,6 +13,7 @@ import type { CellMap, CellPatch } from "@/lib/useMapStream";
 const MAX_INSTANCES = 150000;
 /* Render debug logging: enabled by adding ?griddebug=1 to the URL. */
 const GRID_DEBUG = typeof window !== "undefined" && window.location.search.includes("griddebug=1");
+const UP_AXIS = new THREE.Vector3(0, 1, 0);
 
 export type CellInfo = {
   i: number;
@@ -75,9 +76,13 @@ function InstancedCells({
   /* Last rendered frame. Frame gaps mean dropped wire frames; reconcile ghost slots cheaply. */
   const lastRenderedFrame = useRef(-1);
 
+  // Throttle stats-driven re-renders: only layout on actual patch changes
   useLayoutEffect(() => {
     const mesh = ref.current;
     if (!mesh || !meta || !patch) return;
+    // Use DynamicDrawUsage for streaming updates (hint to WebGL)
+    if (mesh.instanceMatrix) mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    if (mesh.instanceColor) mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
     if (!tmp.current) {
       tmp.current = {
         m: new THREE.Matrix4(),
@@ -287,7 +292,14 @@ function InstancedCells({
     /* Compact slots: move live cells to lowest contiguous slots so mesh.count tracks
        the live scene, not the high-water mark. O(live); run on snapshots only. */
     const compactSlots = (): boolean => {
+      // After a compaction every live slot moves, so the matrices for ALL slots
+      // must re-upload; clear partial update ranges for a full flush.
+      const fullFlush = (): void => {
+        mesh.instanceMatrix.clearUpdateRanges();
+        if (mesh.instanceColor) mesh.instanceColor.clearUpdateRanges();
+      };
       if (c.free.length < 256 || c.free.length < c.slotOf.size) return false;
+      fullFlush();
       const reindex = new Map<number, number>();
       const geo: (CellGeo | null)[] = [];
       const oldSlotOf = c.slotOf;
@@ -310,6 +322,21 @@ function InstancedCells({
       c.geo = oldGeo;
       c.free = [];
       c.next = geo.length;
+      // Rewrite every live slot at its new index (matrix + color) — the moved
+      // slots carry their old buffers' contents.
+      for (const [key, slot] of c.slotOf) {
+        const g = c.geo[slot];
+        if (!g) continue;
+        const b = c.base.get(key);
+        if (!b) continue;
+        t.p.set(b.posX, g.pos[1], b.posZ);
+        t.s.set(g.scale[0], g.scale[1], g.scale[2]);
+        t.q.setFromAxisAngle(UP_AXIS, g.rotY);
+        t.m.compose(t.p, t.q, t.s);
+        mesh.setMatrixAt(slot, t.m);
+        t.c.setHex(g.rgb); // exact stored final colour
+        mesh.setColorAt(slot, t.c);
+      }
       return true;
     };
 
@@ -368,8 +395,17 @@ function InstancedCells({
 
     if (dirty) {
       mesh.count = c.next;
-      if (matDirty) mesh.instanceMatrix.needsUpdate = true;
-      if (colDirty && mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      // Partial-range uploads: only the slots [0, highWater) written since the
+      // last flush move to the GPU, instead of the full MAX_INSTANCES buffers.
+      const highWater = c.next;
+      if (matDirty) {
+        mesh.instanceMatrix.addUpdateRange(0, highWater * 16);
+        mesh.instanceMatrix.needsUpdate = true;
+      }
+      if (colDirty && mesh.instanceColor) {
+        mesh.instanceColor.addUpdateRange(0, highWater * 3);
+        mesh.instanceColor.needsUpdate = true;
+      }
     }
   }, [cells, meta, patch, opacity, travMode]);
 

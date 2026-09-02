@@ -67,8 +67,19 @@ let loopTimer: ReturnType<typeof setTimeout> | null = null;
 const SNAPSHOT_IV = 5;
 const STATS_IV = 2;
 
+/** Stage-1 result: GPU run launched, CPU work still pending. While the GPU
+ *  executes frame k, the loop immediately drains frame k-1's CPU stages —
+ *  the same SEG-ahead-of-GRID overlap the Python server's two threads give. */
+interface Stage1 {
+  fi: number;
+  n: number;
+  slot: import("./projector").ProjectorSlot;
+  runP: Promise<any>;
+  timings: { t0: number; projectMs: number; gpuStart: number };
+}
+let stage1: Stage1 | null = null;
+
 const MAX_POINTS = 130000;
-let pointsBuf = new Float32Array(0);
 let cloudXyz = new Float32Array(0);
 let cloudCls = new Uint8Array(0);
 
@@ -158,8 +169,8 @@ function halfToFloat32(u16: Uint16Array, out: Float32Array, len: number): void {
   }
 }
 
-/** Read + decompress demo frame `fi` into pointsBuf. Returns point count. */
-async function readFrame(fi: number): Promise<number> {
+/** Read + decompress demo frame `fi` into the given slot's points buffer. */
+async function readFrameInto(fi: number, slot: import("./projector").ProjectorSlot): Promise<number> {
   const m = manifest!;
   const ci = Math.floor(fi / m.chunk_frames);
   const ki = fi % m.chunk_frames;
@@ -174,9 +185,9 @@ async function readFrame(fi: number): Promise<number> {
   if (n > MAX_POINTS) throw new Error(`frame has ${n} points > MAX_POINTS`);
   if (st.pointDtype === 16) {
     const u16 = new Uint16Array(raw.buffer, raw.byteOffset, nFloats);
-    halfToFloat32(u16, pointsBuf, n * 4);
+    halfToFloat32(u16, slot.points, n * 4);
   } else {
-    pointsBuf.set(new Float32Array(raw.buffer, raw.byteOffset, n * 4));
+    slot.points.set(new Float32Array(raw.buffer, raw.byteOffset, n * 4));
   }
   return n;
 }
@@ -309,41 +320,50 @@ function cloudEgoFrame(frameIdx: number, points: Float32Array, n: number, cls4: 
   return { xyz, cls: cloudCls.subarray(0, cnt) };
 }
 
-async function processFrame(fi: number): Promise<void> {
-  const t0 = performance.now();
+// ---- two-stage pipelined frame processing ----
+
+/**
+ * Stage 1 (producer): decode -> project -> launch GPU run WITHOUT awaiting it.
+ * The caller then drains the previous frame's stage 2 while the GPU executes,
+ * mirroring the Python server's SEG-thread-ahead-of-GRID-thread overlap.
+ */
+async function runStage1(fi: number): Promise<void> {
   const m = manifest!;
-  const n = await readFrame(fi);
-
-  // project
+  const t0 = performance.now();
+  const slot = projector!.beginFrame();
+  const n = await readFrameInto(fi, slot);
   const tp0 = performance.now();
-  projector!.project(pointsBuf, n);
-  const tp1 = performance.now();
+  projector!.project(slot, n);
+  const gpuStart = performance.now();
+  const input = new ort!.Tensor("float32", slot.image, [1, m.model.in_channels, m.model.h, m.model.w]);
+  const runP = session!.run({ range_image: input });
+  stage1 = { fi, n, slot, runP, timings: { t0, projectMs: gpuStart - tp0, gpuStart } };
+}
 
-  // ONNX inference (graph ends in Softmax -> output is probabilities)
-  const tf0 = performance.now();
-  const input = new ort!.Tensor("float32", projector!.image, [1, m.model.in_channels, m.model.h, m.model.w]);
-  const out = await session!.run({ range_image: input });
-  const probs = out.logits_probs.data as Float32Array;
-  const tf1 = performance.now();
+/** Drain stage 2 (consumer) for the pending stage-1 frame. */
+async function runStage2(): Promise<void> {
+  if (!stage1) return;
+  const p = stage1;
+  stage1 = null; // clear FIRST so an error path can't double-drain
+  const m = manifest!;
+  const tGpuEnd = performance.now();
+  const probs = (await p.runP).logits_probs.data as Float32Array;
 
-  // postprocess: 3x3 prob gather + argmax (fused) -> bin 5->4
   const tpp0 = performance.now();
   const C = m.model.num_classes;
-  gatherArgmax(probs, projector!.proj, n, C, m.model.h, m.model.w, accScratch!, cls5!);
+  gatherArgmax(probs, p.slot.proj, p.n, C, m.model.h, m.model.w, accScratch!, cls5!);
   binClasses(cls5!, binLut!);
   const tpp1 = performance.now();
 
-  // grid update
   const tg0 = performance.now();
-  grid!.update(pointsBuf, cls5!, n);
+  grid!.update(p.slot.points, cls5!, p.n, p.slot.thetas, p.slot.planarRs);
   const tg1 = performance.now();
 
-  // delta / snapshot (pure) -> deliver (zero-copy) -> commit
   const tk0 = performance.now();
   const isSnap = grid!.frame - lastSnapshotFrame >= SNAPSHOT_IV;
   const delta = isSnap ? grid!.computeSnapshot() : grid!.computeDelta();
   const tk1 = performance.now();
-  const yawCd = m.yaws_cd[fi] ?? 0;
+  const yawCd = m.yaws_cd[p.fi] ?? 0;
   const yaw = ((yawCd / 100) * Math.PI) / 180;
   post(
     {
@@ -362,28 +382,27 @@ async function processFrame(fi: number): Promise<void> {
   grid!.commit(delta);
   if (isSnap) lastSnapshotFrame = grid!.frame;
 
-  // cloud (only when a cloud view is active)
   let cloudMs = 0;
   if (cloudOn) {
     const tc0 = performance.now();
-    const c = cloudEgoFrame(fi, pointsBuf, n, cls5!);
+    const c = cloudEgoFrame(p.fi, p.slot.points, p.n, cls5!);
     cloudMs = performance.now() - tc0;
     if (c) {
-      const xyz = c.xyz.slice(); // copy for transfer
+      const xyz = c.xyz.slice();
       const cls = c.cls.slice();
       post({ type: "cloud", frame: grid!.frame, n: cls.length, xyz, cls, epoch, yaw }, [xyz.buffer, cls.buffer]);
     }
   }
 
-  // stats (every STATS_IV frames, mirrors metrics.compute_stats)
-  const procMs = performance.now() - t0;
+  const procMs = performance.now() - p.timings.t0;
+  const gpuMs = tGpuEnd - p.timings.gpuStart;
   pushWin(winProc, procMs);
-  pushWin(winSeg, tp1 - tp0 + (tf1 - tf0) + (tpp1 - tpp0));
+  pushWin(winSeg, p.timings.projectMs + gpuMs + (tpp1 - tpp0));
   pushWin(winGrid, tg1 - tg0);
   pushWin(winPack, tk1 - tk0);
   pushWin(winCloud, cloudMs);
-  pushWin(winProject, tp1 - tp0);
-  pushWin(winForward, tf1 - tf0);
+  pushWin(winProject, p.timings.projectMs);
+  pushWin(winForward, gpuMs);
   pushWin(winPost, tpp1 - tpp0);
   pushWin(winLat, procMs);
   if (grid!.frame - lastStatsFrame >= STATS_IV) {
@@ -407,13 +426,19 @@ async function processFrame(fi: number): Promise<void> {
       capacity_compression: mem.compressionRatio,
       rendered_cells: mem.renderedCells,
       n_cells: mem.nCells,
-      seq_pos: fi,
+      seq_pos: p.fi,
       seq_len: m.seq_len,
       epoch,
       frames_emitted: grid!.frame,
       frames_dropped: 0,
     });
   }
+}
+
+/** Sequential fallback (seek preview / one-off renders): one full frame. */
+async function processFrame(fi: number): Promise<void> {
+  await runStage1(fi);
+  await runStage2();
 }
 
 // ---- playback loop ----
@@ -483,7 +508,11 @@ async function loopTick(gen: number): Promise<void> {
     if (!running || gen !== loopGen) return; // seeked while buffering
   }
   try {
-    await processFrame(fi);
+    // Stage 1: launch this frame's GPU run (no await of the GPU yet).
+    await runStage1(fi);
+    // Stage 2 of the PREVIOUS tick runs here while this frame's GPU executes:
+    // decode+project (CPU) overlapped the GPU; now gather+grid+pack overlap it too.
+    await runStage2();
   } catch (e) {
     post({ type: "error", message: `frame ${fi} failed: ${e}` });
     running = false;
@@ -504,6 +533,7 @@ function doSeek(fi: number): void {
     clearTimeout(loopTimer);
     loopTimer = null;
   }
+  stage1 = null; // drop the stale in-flight frame; its epoch won't match
   grid!.reset();
   cloudHist = [];
   lastSnapshotFrame = -999;
@@ -604,7 +634,6 @@ async function init(): Promise<void> {
       MAX_POINTS,
     );
     binLut = makeBinLut(m.model.bin_5_to_4);
-    pointsBuf = new Float32Array(MAX_POINTS * 4);
     cloudXyz = new Float32Array(m.cloud.points_max * 3);
     cloudCls = new Uint8Array(m.cloud.points_max);
     accScratch = new Float32Array(m.model.num_classes);
@@ -666,6 +695,8 @@ self.onmessage = (ev: MessageEvent) => {
       clearTimeout(loopTimer);
       loopTimer = null;
     }
+    // Drain the in-flight frame so the final patch isn't lost on pause.
+    if (stage1) void runStage2().catch(() => {});
   } else if (action === "speed") {
     speed = Math.max(0.05, Number(data.value) || 1);
   } else if (action === "cloud") {
