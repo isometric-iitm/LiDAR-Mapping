@@ -1,5 +1,5 @@
 /**
- * Spherical range-image projector — TypeScript port of src/data/projection.py.
+ * Spherical range-image projector - TypeScript port of src/data/projection.py.
  *
  * Produces the exact input contract the exported ONNX model expects:
  *   image: CHW Float32Array (5, h, w) = [r/max_range, x/max_range, y/max_range,
@@ -16,7 +16,7 @@
  * k's GPU inference from one slot while frame k-1's CPU stages still read the
  * other, so no stage ever overwrites data a pending frame depends on. The
  * slot also carries the per-point polar values (theta, planar radius) the
- * grid needs — computed here once instead of recomputed by the grid.
+ * grid needs - computed here once instead of recomputed by the grid.
  */
 
 export interface ProjectorOptions {
@@ -28,15 +28,15 @@ export interface ProjectorOptions {
 }
 
 export interface ProjectorSlot {
-  /** (maxPoints, 4) xyzi — filled by the frame reader, read by project/grid */
+  /** (maxPoints, 4) xyzi - filled by the frame reader, read by project/grid */
   points: Float32Array;
   /** CHW (5, h, w) model input image */
   image: Float32Array;
   /** (maxPoints, 2) (row, col) per point */
   proj: Int32Array;
-  /** (maxPoints,) atan2(y, x) per point — reused by the grid */
+  /** (maxPoints,) atan2(y, x) per point - reused by the grid */
   thetas: Float64Array;
-  /** (maxPoints,) hypot(x, y) per point — reused by the grid */
+  /** (maxPoints,) hypot(x, y) per point - reused by the grid */
   planarRs: Float64Array;
 }
 

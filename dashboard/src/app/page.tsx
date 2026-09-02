@@ -11,6 +11,7 @@ import MetricsPanel, { type ViewMode } from "@/components/MetricsPanel";
 import Timeline from "@/components/Timeline";
 import ClientEngineLoader from "@/components/ClientEngineLoader";
 import DemoBanner from "@/components/DemoBanner";
+import DeviceGate, { checkDevice, type GateVerdict } from "@/components/DeviceGate";
 import { CLASSES } from "@/lib/colors";
 import {
   CellLayer,
@@ -149,6 +150,7 @@ export default function Home() {
     initializing,
     download,
     error,
+    start,
   } = useClientEngine();
   const [paused, setPaused] = useState(true);
   const [speed, setSpeed] = useState(1);
@@ -158,6 +160,16 @@ export default function Home() {
   const [camMode, setCamMode] = useState<CamMode>("persp");
   const [animTarget, setAnimTarget] = useState<{ pos: THREE.Vector3; look: THREE.Vector3 } | null>(null);
   const [availableSeqs] = useState<SeqInfo[]>([]);
+  /* Device gate: blocks all engine downloads until the viewport + WebGPU
+   * checks pass (or the user forces through). The verdict is computed once
+   * on mount; passing releases the engine from an effect (never mid-render). */
+  const [gateVerdict] = useState<GateVerdict>(() => checkDevice());
+  const [forced, setForced] = useState(false);
+  const passGate = useCallback(() => setForced(true), []);
+  const gatePassed = !gateVerdict.ok ? forced : true; // ok verdict: no gate at all
+  useEffect(() => {
+    if (gatePassed) start();
+  }, [gatePassed, start]);
 
   // client-side perf tracking (wired to PerfOverlay + sidebar FPS)
   const [clientFps, setClientFps] = useState(0);
@@ -303,17 +315,17 @@ export default function Home() {
 
           {/* -- Loading / engine boot overlay -------------------------------- */}
           <ClientEngineLoader
-            initializing={initializing || (buffering && cellCount === 0)}
+            initializing={gatePassed && (initializing || (buffering && cellCount === 0))}
             statusMsg={statusMsg}
             download={download}
             webgpuUnsupported={webgpuUnsupported}
-            error={error}
+            error={gatePassed ? error : null}
           />
           {buffering && cellCount > 0 && (
             <div className="pointer-events-none absolute inset-x-0 top-16 z-20 flex justify-center">
               <div className="frost flex items-center gap-2 px-4 py-2 text-xs text-zinc-300">
                 <Refresh className="h-3.5 w-3.5 animate-spin text-cyan-400" />
-                {statusMsg ?? "Buffering…"}
+                {statusMsg ?? "Buffering..."}
               </div>
             </div>
           )}
@@ -323,8 +335,11 @@ export default function Home() {
             </div>
           )}
 
+          {/* -- pre-download device gate (viewport + WebGPU) -------------- */}
+          {!gateVerdict.ok && !forced && <DeviceGate verdict={gateVerdict} onPass={passGate} />}
+
           {/* -- closable browser-engine banner (below the legend) ---------- */}
-          <DemoBanner />
+          {gatePassed && <DemoBanner />}
 
           {/* -- HUD top chrome: legend (left) / camera controls (right) --- */}
           <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-3">

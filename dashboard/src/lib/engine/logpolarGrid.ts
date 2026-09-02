@@ -1,5 +1,5 @@
 /**
- * Log-polar variable-resolution 2.5D grid — TypeScript port of
+ * Log-polar variable-resolution 2.5D grid - TypeScript port of
  * src/grid_engine/logpolar_grid.py (LogPolarGrid), optimized for the browser:
  *
  *  - Counting sort by cell id (stable, O(n + n_cells)) replaces the O(n log n)
@@ -9,7 +9,7 @@
  *    membership flags, so delta extraction and instant-free walk ~52k live
  *    cells instead of scanning all 469,440 cells five times per frame.
  *
- * Semantics (strictly per-frame, "precise mode" — identical to Python):
+ * Semantics (strictly per-frame, "precise mode" - identical to Python):
  *   - occupancy is binary this scan only (hit = occGain, else 0 -> freed)
  *   - class is the per-frame majority vote of this scan's points
  *   - z stats are this scan's points rebased onto the per-frame ground
@@ -54,11 +54,11 @@ export type CellRow = [number, number, number, number, number, number, number];
 export interface PackedPatch {
   isSnap: boolean;
   frame: number;
-  /** (k,6) f32: i, j, zMean, zMax, occ, trav — transferable */
+  /** (k,6) f32: i, j, zMean, zMax, occ, trav - transferable */
   rows: Float32Array;
-  /** (k,) u8: cls — transferable */
+  /** (k,) u8: cls - transferable */
   cls: Uint8Array;
-  /** (m,2) f32: freed [i,j] pairs — transferable */
+  /** (m,2) f32: freed [i,j] pairs - transferable */
   freed: Float32Array;
   /** worker-side: upsert cell ids (NOT transferred) */
   upIds: Int32Array;
@@ -203,7 +203,7 @@ export class LogPolarGrid {
   }
 
   /**
-   * Frame update — port of update(points, per_class) + _apply_precise +
+   * Frame update - port of update(points, per_class) + _apply_precise +
    * _clear_freed, with counting sort + incremental rendered-list maintenance.
    * thetas/planarRs come from the projector slot (computed once, reused here).
    */

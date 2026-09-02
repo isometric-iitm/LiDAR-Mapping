@@ -28,6 +28,8 @@ export type UseClientEngine = UseMapStream & {
   /** Latest asset download progress (loader UI). */
   download: EngineDownload | null;
   error: string | null;
+  /** Deferred start: the device gate calls this before any download begins. */
+  start: () => void;
 };
 
 type WorkerPatch =
@@ -116,18 +118,15 @@ export function useClientEngine(): UseClientEngine {
   const lastHeading = useRef(-1);
   const cloudOnRef = useRef(false);
   const sendRef = useRef<(msg: object) => void>(() => {});
+  /* Device gate: start() records that the gate passed and spawns the worker
+   * (which begins all downloads). If start() fires before this effect has
+   * installed spawn(), the flag makes the effect spawn on mount instead. */
+  const gateRef = useRef<{ started: boolean; spawn: (() => void) | null }>({ started: false, spawn: null });
 
   useEffect(() => {
     let worker: Worker | null = null;
-    try {
-      worker = new Worker(new URL("./engineWorker", import.meta.url), { type: "module" });
-    } catch {
-      return; // onerror/onmessage below handle surfacing; worker simply can't run
-    }
-    workerRef.current = worker;
-    sendRef.current = (msg: object) => worker!.postMessage(msg);
 
-    worker.onmessage = (ev: MessageEvent) => {
+    const handleMsg = (ev: MessageEvent) => {
       const msg = ev.data as WorkerMsg;
       switch (msg.type) {
         case "grid_meta": {
@@ -252,15 +251,32 @@ export function useClientEngine(): UseClientEngine {
       }
     };
 
-    worker.onerror = () => {
-      setError("engine worker crashed");
-      setInitializing(false);
+    const spawn = (): void => {
+      if (gateRef.current.started) return; // already spawned
+      gateRef.current.started = true;
+      try {
+        worker = new Worker(new URL("./engineWorker", import.meta.url), { type: "module" });
+      } catch {
+        gateRef.current.started = false;
+        return;
+      }
+      workerRef.current = worker;
+      worker.onmessage = handleMsg;
+      worker.onerror = () => {
+        setError("engine worker crashed");
+        setInitializing(false);
+      };
+      sendRef.current = (msg: object) => worker!.postMessage(msg);
+      worker.postMessage({ type: "init" });
     };
 
-    worker.postMessage({ type: "init" });
+    // expose spawn for start(); honor an early start() that arrived before
+    // this effect ran (its call was a no-op, the flag says go)
+    gateRef.current.spawn = spawn;
+    if (gateRef.current.started) spawn();
 
     return () => {
-      worker!.terminate();
+      worker?.terminate();
       workerRef.current = null;
     };
   }, []);
@@ -268,6 +284,14 @@ export function useClientEngine(): UseClientEngine {
   const seekTo = useCallback((idx: number) => {
     setSeeking(true);
     sendRef.current({ type: "control", action: "seek", value: idx });
+  }, []);
+
+  /** Device-gate trigger: spawns the worker (downloads start only after this).
+   *  Safe to call before mount: the flag is honored when the effect runs. */
+  const start = useCallback(() => {
+    const g = gateRef.current;
+    if (g.spawn) g.spawn();
+    else g.started = true; // effect not yet run; spawn on mount
   }, []);
 
   const setCloudOnLocal = useCallback((on: boolean) => {
@@ -319,5 +343,6 @@ export function useClientEngine(): UseClientEngine {
     initializing,
     download,
     error,
+    start,
   } as UseClientEngine;
 }

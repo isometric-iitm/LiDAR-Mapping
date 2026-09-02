@@ -41,8 +41,8 @@ export default function ClientEngineLoader({ initializing, statusMsg, download, 
           <div className="flex items-center gap-3">
             <Refresh className="h-5 w-5 shrink-0 animate-spin text-cyan-400" />
             <div className="min-w-0">
-              <div className="hud-cap text-cyan-400/90">pc2d · in-browser engine</div>
-              <div className="truncate text-sm text-zinc-100">{error ?? statusMsg ?? "Loading model…"}</div>
+              <div className="hud-cap text-cyan-400/90">pc2d   in-browser engine</div>
+              <div className="truncate text-sm text-zinc-100">{error ?? statusMsg ?? "Loading model..."}</div>
             </div>
             {pct !== null && <div className="hud-big ml-auto tabular-nums text-zinc-200">{pct}%</div>}
           </div>
@@ -68,7 +68,7 @@ export default function ClientEngineLoader({ initializing, statusMsg, download, 
           {!d && !error && (
             <div className="flex items-center gap-2 text-xs text-zinc-500">
               <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-400" />
-              {statusMsg ?? "Compiling WebGPU kernels…"}
+              {statusMsg ?? "Compiling WebGPU kernels..."}
             </div>
           )}
 
@@ -79,7 +79,7 @@ export default function ClientEngineLoader({ initializing, statusMsg, download, 
           )}
 
           <div className="text-[11px] text-zinc-600">
-            Assets are cached in your browser — next visits start instantly and work offline.
+            Assets are cached in your browser - next visits start instantly and work offline.
           </div>
         </div>
       )}

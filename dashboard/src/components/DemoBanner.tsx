@@ -1,12 +1,11 @@
 "use client";
 /**
  * One-time, closable info banner (top-left, below the legend) explaining that
- * this deployed demo runs the FULL pipeline — neural inference included — live
+ * this deployed demo runs the FULL pipeline - neural inference included - live
  * in the browser via WebGPU; the deployed build simply trades throughput for
  * zero-server hosting (a GPU-server deployment of the same code runs faster).
  */
 import { useState } from "react";
-import { X } from "iconoir-react";
 
 const DISMISS_KEY = "pc2d-demo-banner-dismissed";
 
@@ -40,7 +39,7 @@ export default function DemoBanner() {
         <div className="min-w-0 text-[11px] leading-snug text-zinc-300">
           <span className="font-semibold text-cyan-300">Runs entirely in your browser.</span>{" "}
           Segmentation, tracking &amp; rendering all execute live on-device via
-          WebGPU — no server behind this demo. The same pipeline on a dedicated
+          WebGPU - no server behind this demo. The same pipeline on a dedicated
           GPU server runs multiple times faster; this zero-server deployment
           trades throughput for instant, scalable hosting.
         </div>
@@ -49,7 +48,11 @@ export default function DemoBanner() {
           aria-label="Dismiss"
           className="shrink-0 rounded-[3px] p-0.5 text-zinc-500 transition-colors hover:bg-white/10 hover:text-zinc-200"
         >
-          <X width={13} height={13} strokeWidth={2} />
+          {/* plain close cross (two strokes), not a brand mark */}
+          <svg width={13} height={13} viewBox="0 0 13 13" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round">
+            <path d="M2.5 2.5 L10.5 10.5" />
+            <path d="M10.5 2.5 L2.5 10.5" />
+          </svg>
         </button>
       </div>
     </div>

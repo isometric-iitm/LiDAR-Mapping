@@ -322,7 +322,7 @@ function InstancedCells({
       c.geo = oldGeo;
       c.free = [];
       c.next = geo.length;
-      // Rewrite every live slot at its new index (matrix + color) — the moved
+      // Rewrite every live slot at its new index (matrix + color) - the moved
       // slots carry their old buffers' contents.
       for (const [key, slot] of c.slotOf) {
         const g = c.geo[slot];

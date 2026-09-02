@@ -68,7 +68,7 @@ const SNAPSHOT_IV = 5;
 const STATS_IV = 2;
 
 /** Stage-1 result: GPU run launched, CPU work still pending. While the GPU
- *  executes frame k, the loop immediately drains frame k-1's CPU stages —
+ *  executes frame k, the loop immediately drains frame k-1's CPU stages -
  *  the same SEG-ahead-of-GRID overlap the Python server's two threads give. */
 interface Stage1 {
   fi: number;
@@ -460,7 +460,7 @@ function requestPreview(): void {
       const m = manifest!;
       const ci = Math.floor(frameCursor / m.chunk_frames);
       if (!chunks[ci]) {
-        post({ type: "status", state: "buffering", msg: `Loading part ${ci + 1}/${m.n_chunks}…` });
+        post({ type: "status", state: "buffering", msg: `Loading part ${ci + 1}/${m.n_chunks}...` });
         await ensureChunk(ci, (p) =>
           post({ type: "download", phase: "sequence", chunk: ci, fraction: p.fraction, loaded: p.loaded, total: p.total }),
         );
@@ -494,7 +494,7 @@ async function loopTick(gen: number): Promise<void> {
   }
   const ci = Math.floor(fi / m.chunk_frames);
   if (!chunks[ci]) {
-    post({ type: "status", state: "buffering", msg: `Buffering part ${ci + 1}/${m.n_chunks}…` });
+    post({ type: "status", state: "buffering", msg: `Buffering part ${ci + 1}/${m.n_chunks}...` });
     try {
       await ensureChunk(ci, (p) =>
         post({ type: "download", phase: "sequence", chunk: ci, fraction: p.fraction, loaded: p.loaded, total: p.total }),
@@ -565,26 +565,37 @@ async function init(): Promise<void> {
       return;
     }
 
-    post({ type: "status", state: "loading", msg: "Loading demo manifest…" });
+    post({ type: "status", state: "loading", msg: "Loading demo manifest..." });
     manifest = await fetchManifest();
     const m = manifest;
 
-    post({ type: "status", state: "loading", msg: "Downloading neural weights…" });
+    post({ type: "status", state: "loading", msg: "Downloading neural weights..." });
     const modelKey = `model:${m.model.file}`;
     const modelBuf = await fetchAsset(`${DEMO_BASE}${m.model.file}`, modelKey, 0, (p) => {
       post({ type: "download", phase: "model", fraction: p.fraction, loaded: p.loaded, total: p.total });
     });
 
-    post({ type: "status", state: "loading", msg: "Compiling WebGPU kernels…" });
-    // ORT is copied to /ort/ at build time (scripts/copy-ort.mjs); loaded with
+    post({ type: "status", state: "loading", msg: "Compiling WebGPU kernels..." });
+    // ORT is copied to /ort/ at build time (scripts/copy-assets.mjs); loaded with
     // a runtime import so no bundler ever touches it (wasm-safe, static-export-safe).
     const ortUrl = new URL("/ort/ort.webgpu.bundle.min.mjs", self.location.origin).href;
     ort = (await import(/* webpackIgnore: true */ /* turbopackIgnore: true */ ortUrl)) as OrtModule;
     ort.env.wasm.wasmPaths = "/ort/";
+    // Prefer the discrete GPU on dual-GPU machines (laptops). Windows currently
+    // ignores powerPreference in requestAdapter (crbug.com/369219127) but this
+    // still selects correctly on macOS/Linux and future Windows builds.
+    if (ort.env.webgpu) {
+      ort.env.webgpu.powerPreference = "high-performance";
+    }
     let sessionReady = false;
     let sessionError = "";
     try {
-      session = await ort.InferenceSession.create(modelBuf, { executionProviders: ["webgpu"] });
+      session = await ort.InferenceSession.create(modelBuf, {
+        executionProviders: ["webgpu"],
+        // graph optimization level: all (the default; kept explicit so a
+        // future ORT default change can't silently regress speed)
+        graphOptimizationLevel: "all",
+      });
       // A full-size warmup run both compiles kernels and proves the EP works;
       // failing here (e.g. blocked adapter) means the browser can't run the demo.
       const warmup = new ort.Tensor(
@@ -640,7 +651,7 @@ async function init(): Promise<void> {
     cls5 = new Uint8Array(MAX_POINTS);
 
     // 3) chunk 0 (blocking) then ready
-    post({ type: "status", state: "loading", msg: "Downloading first sequence part…" });
+    post({ type: "status", state: "loading", msg: "Downloading first sequence part..." });
     await ensureChunk(0, (p) =>
       post({ type: "download", phase: "sequence", chunk: 0, fraction: p.fraction, loaded: p.loaded, total: p.total }),
     );
