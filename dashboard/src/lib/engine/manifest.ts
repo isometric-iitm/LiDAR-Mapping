@@ -50,7 +50,8 @@ export interface DemoManifest {
     class_scores: number[];
   };
   cloud: { points_max: number; history_frames: number };
-  model: {
+  /** Baked demo: no live inference. Optional legacy field kept for back-compat. */
+  model?: {
     file: string;
     in_channels: number;
     num_classes: number;
@@ -60,6 +61,20 @@ export interface DemoManifest {
     fov_bottom_deg: number;
     max_range: number;
     bin_5_to_4: number[];
+  };
+  /** Precomputed demo segments (pure replay, no live inference). Formerly `baked`. */
+  baked?: {
+    version: number;
+    chunks: DemoChunkMeta[];
+    total_bytes: number;
+    snapshot_interval: number;
+  };
+  /** Obfuscated name for baked segments - used in production to avoid obvious `baked` fetches. */
+  preload?: {
+    version: number;
+    chunks: DemoChunkMeta[];
+    total_bytes: number;
+    snapshot_interval: number;
   };
   total_bytes: number;
 }

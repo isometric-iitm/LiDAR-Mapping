@@ -31,61 +31,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const REPO_ROOT = join(__dirname, "..", "..");
 
-const ortPkg = "onnxruntime-web";
-// onnxruntime-web's "exports" map only exposes entry points, not the dist
-// folder, so resolve the "./webgpu" export and walk up to package root.
-let ortDir;
-try {
-  const webgpuEntry = require.resolve(`${ortPkg}/webgpu`);
-  // .../node_modules/onnxruntime-web/dist/... -> package root
-  let dir = dirname(webgpuEntry);
-  while (basename(dir) !== "onnxruntime-web" && dirname(dir) !== dir) dir = dirname(dir);
-  if (basename(dir) !== "onnxruntime-web") throw new Error("package root not found");
-  ortDir = dir;
-} catch {
-  // during `npm install` (postinstall) the package may not be on disk yet on
-  // a fresh install; the `build` script runs this again and is authoritative.
-  console.warn(`[copy-assets] ${ortPkg} not resolvable yet (fresh install?); skipping (npm run build will copy)`);
-  process.exit(0);
-}
-
+// Baked demo: no onnxruntime-web / ort wasm (was >25 MiB, blocked CF Pages).
+// Clean any stale ort dir if present.
 const outDir = join(__dirname, "..", "public", "ort");
-mkdirSync(outDir, { recursive: true });
-
-// The ONLY files the webgpu bundle can load at runtime (verified: the
-// .asyncify loader pair are the sole wasm/mjs literals inside the bundle).
-const WANTED_FILES = new Set([
-  "ort.webgpu.bundle.min.mjs",
-  "ort-wasm-simd-threaded.asyncify.mjs",
-  "ort-wasm-simd-threaded.asyncify.wasm",
-]);
-
-let copied = 0;
-const dist = join(ortDir, "dist");
-for (const f of readdirSync(dist)) {
-  if (WANTED_FILES.has(f)) {
-    copyFileSync(join(dist, f), join(outDir, f));
-    copied++;
-  }
-}
-
-// Prune stale files from earlier copies / ORT upgrades: anything in
-// public/ort/ that the current bundle can't load is dead deploy weight
-// (and jsep.wasm would even break CF Pages' 25 MiB upload).
-for (const f of readdirSync(outDir)) {
-  if (!WANTED_FILES.has(f)) {
-    rmSync(join(outDir, f));
-    console.log(`[copy-assets] pruned stale ${f}`);
-  }
-}
-
-for (const f of WANTED_FILES) {
-  if (!existsSync(join(outDir, f))) {
-    console.error(`[copy-assets] FAILED: ${f} missing from onnxruntime-web/dist`);
-    process.exit(1);
-  }
-}
-console.log(`[copy-assets] ${copied} files -> public/ort/`);
+if (existsSync(outDir)) { rmSync(outDir, { recursive: true, force: true }); console.log(`[copy-assets] removed stale public/ort/`); }
 
 // ---- 2) baked metrics (training history + latest eval) ------------------
 // Consumed via direct `import` in src (bundled at build time), also readable
@@ -144,7 +93,7 @@ function walkFiles(dir) {
 }
 
 const CF_MAX_BYTES = 25 * 1024 * 1024;
-const GUARD_DIRS = ["ort", "demo"];
+const GUARD_DIRS = ["demo"];
 let oversized = 0;
 for (const dir of GUARD_DIRS) {
   const abs = join(__dirname, "..", "public", dir);
@@ -160,4 +109,4 @@ for (const dir of GUARD_DIRS) {
 if (oversized > 0) {
   process.exit(1);
 }
-console.log("[copy-assets] deploy guard OK: every file in public/{ort,demo} is under the 25 MiB CF Pages limit");
+console.log("[copy-assets] deploy guard OK: every file in public/demo is under the 25 MiB CF Pages limit");

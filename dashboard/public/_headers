@@ -1,0 +1,9 @@
+/demo/preload/*
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+  Pragma: no-cache
+
+/demo/manifest.json
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+
+/api/stream/*
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0

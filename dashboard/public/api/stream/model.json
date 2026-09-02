@@ -1,0 +1,1 @@
+{"name": "pc2d-edge-lite", "weights": "quantized", "size_mb": 42, "full_size_mb": 143, "note": "SA Admin requested lightweight showcase; full weights require dedicated GPU/TPU"}

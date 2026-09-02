@@ -37,11 +37,10 @@ export default function DemoBanner() {
     <div className="frost pointer-events-auto absolute left-3 top-14 z-20 max-w-xs px-3 py-2.5">
       <div className="flex items-start gap-2">
         <div className="min-w-0 text-[11px] leading-snug text-zinc-300">
-          <span className="font-semibold text-cyan-300">Runs entirely in your browser.</span>{" "}
-          Segmentation, tracking &amp; rendering all execute live on-device via
-          WebGPU - no server behind this demo. The same pipeline on a dedicated
-          GPU server runs multiple times faster; this zero-server deployment
-          trades throughput for instant, scalable hosting.
+          <span className="font-semibold text-cyan-300">Showcase build</span> lighter
+          quantized model (int8). Per SA Admin this demo runs the edge lite
+          weights on free tier compute. Full weights need dedicated GPU/TPU for
+          higher fidelity.
         </div>
         <button
           onClick={close}

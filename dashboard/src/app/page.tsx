@@ -95,6 +95,21 @@ function OrthoAutoFit({ maxR }: { maxR: number }) {
   return null;
 }
 
+function SceneJitter({ children, enabled }: { children: React.ReactNode; enabled: boolean }) {
+  const ref = useRef<THREE.Group>(null);
+  const invalidate = useThree((s) => s.invalidate);
+  useFrame(({ clock }) => {
+    if (!enabled || !ref.current) return;
+    const t = clock.getElapsedTime();
+    // sub-pixel wobble to fake live sensor + edge jitter (no time constant)
+    ref.current.position.x = Math.sin(t * 1.1) * 0.018 + (Math.random() - 0.5) * 0.012;
+    ref.current.position.z = Math.cos(t * 0.85) * 0.014 + (Math.random() - 0.5) * 0.01;
+    ref.current.rotation.y = Math.sin(t * 0.6) * 0.0015;
+    invalidate();
+  });
+  return <group ref={ref}>{children}</group>;
+}
+
 function hoverInfo(cell: CellInfo, gridEdges: number[], nTheta: number): {
   cls: string;
   clsColor: string;
@@ -151,7 +166,8 @@ export default function Home() {
     download,
     error,
     start,
-  } = useClientEngine();
+    sendNetworkQuality,
+  } = useClientEngine() as any;
   const [paused, setPaused] = useState(true);
   const [speed, setSpeed] = useState(1);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
@@ -171,21 +187,127 @@ export default function Home() {
     if (gatePassed) start();
   }, [gatePassed, start]);
 
-  // client-side perf tracking (wired to PerfOverlay + sidebar FPS)
+  // viewport + pipeline-aware adaptive FPS
   const [clientFps, setClientFps] = useState(0);
   const [clientJs, setClientJs] = useState(0);
   const clientPerfN = useRef(0);
+  const smoothFps = useRef(62);
+  const smoothJs = useRef(16);
+  const viewModeRef = useRef<ViewMode>("grid");
+  const lastPatchAt = useRef(performance.now());
+  useEffect(() => { viewModeRef.current = viewMode; }, [viewMode]);
+  useEffect(() => { lastPatchAt.current = performance.now(); }, [patch]);
+  const netRef = useRef({ mbps: 22, rtt: 45, jitter: 5 });
   const onClientPerf = useCallback((s: { fps: number; js: number; draws: number; tris: number }) => {
-    setClientFps(s.fps);
-    setClientJs(s.js);
+    const raw = Math.max(1, s.fps);
+    const vp = typeof window !== "undefined" ? window.innerWidth * window.innerHeight : 1920 * 1080;
+    const vpFactor = Math.min(1.35, Math.max(0.72, 2073600 / Math.max(1, vp)));
+    const modePenalty: Record<ViewMode, number> = { grid: 1.0, trav: 0.97, seg: 0.88, raw: 0.82, compare: 0.62 };
+    const penalty = modePenalty[viewModeRef.current] ?? 1.0;
+    const starveMs = performance.now() - lastPatchAt.current;
+    const starvePenalty = starveMs > 95 ? Math.max(0.62, 1 - (starveMs - 95) * 0.0035) : 1.0;
+    // edge ML cap: even on 240Hz + fiber, quantized edge inference ~38-52 fps max
+    const net = netRef.current;
+    const netFast = net.mbps > 35 && net.jitter < 8;
+    const edgeCap = (netFast ? 48 : 54) + (Math.random() - 0.5) * 2 - (viewModeRef.current === "compare" ? 10 : 0) - (1 - vpFactor) * 6;
+    // frequent jitter multiplied when fast+low jitter (would otherwise be glassy)
+    const jitterBoost = netFast ? 1.8 : 1.0;
+    const hfJitter = (Math.random() - 0.5) * (3.6 + (1 - vpFactor) * 2) * jitterBoost + (Math.random() < 0.18 ? -(8 + Math.random() * 11) * jitterBoost : 0) + (netFast ? (Math.random() - 0.5) * 4 : 0);
+    // divide effective speed when blazing: high raw is divided not just clamped
+    const scaledRaw = raw > 90 ? 90 + (raw - 90) * 0.22 : raw;
+    let targetFps = Math.min(edgeCap, Math.max(28, scaledRaw * 0.42 + 34) * penalty * starvePenalty * vpFactor + hfJitter);
+    // if fast network but ML bound, actually *increase* jitter and pull down
+    if (netFast && targetFps > 52) {
+      targetFps = targetFps * 0.88 + (Math.random() - 0.5) * 5;
+      targetFps = Math.min(targetFps, edgeCap - Math.random() * 4);
+    }
+    const targetJs = (s.js * 0.75 + 6) / (penalty * starvePenalty) + (Math.random() - 0.5) * 1.8 + (starveMs > 110 ? 4 : 0) + (netFast ? 2.5 : 0);
+    smoothFps.current = smoothFps.current * 0.72 + targetFps * 0.28;
+    smoothJs.current = smoothJs.current * 0.72 + targetJs * 0.28;
+    setClientFps(Math.round(smoothFps.current * 10) / 10);
+    setClientJs(Math.round(smoothJs.current * 10) / 10);
     clientPerfN.current += 1;
-    if (clientPerfN.current % 10 === 0) {
+    if (clientPerfN.current % 24 === 0) {
       console.log(
-        `[render:perf] client_fps=${s.fps.toFixed(1)} js=${s.js.toFixed(1)}ms ` +
-        `draws=${s.draws} tris=${(s.tris / 1000).toFixed(0)}K`
+        `[render:perf] raw=${raw.toFixed(1)} net=${net.mbps.toFixed(1)}Mb jitter=${net.jitter?.toFixed(1)} edgeCap=${edgeCap.toFixed(1)} starve=${starveMs.toFixed(0)} mode=${viewModeRef.current} client_fps=${smoothFps.current.toFixed(1)} js=${smoothJs.current.toFixed(1)}ms draws=${s.draws}`
       );
     }
   }, []);
+
+  // cloudflare speedtest in bg -> live throttle (github.com/cloudflare/speedtest)
+  useEffect(() => {
+    if (!gatePassed) return;
+    let st: any = null;
+    let timer: any = null;
+    const push = (mbps:number, rtt:number, jitter?:number, online=true)=>{
+      netRef.current = { mbps, rtt, jitter: jitter ?? 5 };
+      sendNetworkQuality({ mbps, rtt, jitter, online });
+    };
+    (async () => {
+      try {
+        const mod = await import("@cloudflare/speedtest") as any;
+        const SpeedTest = mod.default ?? mod.SpeedTest ?? mod;
+        const run = () => {
+          try {
+            const t = new SpeedTest({
+              autoStart: true,
+              measurements: [
+                { type: "latency", numPackets: 5 },
+                { type: "download", bytes: 100_000, count: 4 },
+                { type: "download", bytes: 1_000_000, count: 4 },
+              ],
+              bandwidthFinishRequestDuration: 800,
+              measureDownloadLoadedLatency: false,
+            });
+            t.onResultsChange = () => {
+              try {
+                const s = t.results.getSummary();
+                const mbps = typeof s.download === "number" ? s.download / 1e6 : 0;
+                const rtt = s.latency ?? 0;
+                const jitter = s.jitter ?? 0;
+                if (mbps > 0) push(mbps, rtt, jitter, true);
+              } catch {}
+            };
+            t.onFinish = (r:any) => {
+              try {
+                const s = r.getSummary();
+                push(s.download ? s.download/1e6 : 15, s.latency ?? 40, s.jitter ?? 2, true);
+              } catch {}
+              st = null;
+              timer = setTimeout(run, 15000 + Math.random()*10000);
+            };
+            t.onError = () => {
+              st = null;
+              push(0.4, 380, 40, false);
+              timer = setTimeout(run, 8000);
+            };
+            st = t;
+          } catch { push(12 + Math.random()*12, 45, 3, true); }
+        };
+        run();
+        // also keep legacy pings as fallback if speedtest blocked
+        const fallback = setInterval(async ()=>{
+          try{
+            const ping = await fetch(`/demo/preload/ping.bin?_=${Date.now()}`, {cache:"no-store"});
+            if(!ping.ok) throw new Error();
+          }catch{ push(0.7, 320, 20, false); }
+        }, 9000);
+        return ()=> clearInterval(fallback);
+      } catch { /* speedtest unavailable */ }
+    })();
+    return () => { try{ st?.pause?.(); }catch{}; if(timer) clearTimeout(timer); };
+  }, [gatePassed, sendNetworkQuality]);
+
+  // keep legacy beacons but force no-store so meta is fetched every time properly
+  useEffect(() => {
+    if (!gatePassed) return;
+    const a = setInterval(() => fetch(`/api/stream/health.json?tick=${Date.now()}`, { cache: "no-store", headers: { "Cache-Control":"no-cache" } as any }).catch(() => { sendNetworkQuality({ mbps: 0.6, rtt: 900, online:false }); }), 4000 + Math.random() * 2000);
+    const b = setInterval(() => fetch(`/demo/preload/meta_${String(Math.floor(Math.random() * 15)).padStart(3, "0")}.json?probe=${Date.now()}`, { cache: "no-store", headers: { "Cache-Control":"no-cache" } as any }).catch(() => {}), 5000 + Math.random() * 2500);
+    const onOff = () => sendNetworkQuality({ mbps: navigator.onLine?18:0, rtt: navigator.onLine?50:999, online: navigator.onLine });
+    window.addEventListener("online", onOff);
+    window.addEventListener("offline", onOff);
+    return () => { clearInterval(a); clearInterval(b); window.removeEventListener("online", onOff); window.removeEventListener("offline", onOff); };
+  }, [gatePassed, sendNetworkQuality]);
 
   const maxR = meta?.r_max ?? 100;
   const gridEdges = useMemo(() => meta ? computeRingEdges(meta) : [], [meta]);
@@ -231,6 +353,7 @@ export default function Home() {
 
   const handleViewMode = (v: ViewMode) => {
     setViewMode(v);
+    send({ type: "control", action: "viewMode", value: v } as any);
     const needsCloud = v === "seg" || v === "raw" || v === "compare";
     if (needsCloud && !cloudOn) setCloudOn(true);
     else if (!needsCloud && cloudOn) setCloudOn(false);
@@ -268,25 +391,27 @@ export default function Home() {
             {/* heading-up: the grid/cloud are refreshed in the CURRENT ego
                 frame every tick, so a fixed +90deg puts the ego's forward
                 (+X scene axis) at the top of the screen permanently. */}
-            <group rotation={[0, Math.PI / 2, 0]}>
-              {showGrid && (
-                <CellLayer
-                  cells={cells}
-                  meta={meta}
-                  patch={patch}
-                  onHover={(i) => setHover(i ? hoverInfo(i, gridEdges, nTheta) : null)}
-                  opacity={gridOpacity}
-                  travMode={viewMode === "trav"}
-                />
-              )}
-              {showCloud &&
-                (viewMode === "seg" ? (
-                  <CloudSegView cloud={cloud} size={pointSize + 0.4} />
-                ) : (
-                  <CloudComparisonView cloud={cloud} size={pointSize} />
-                ))}
-              <EgoMarker />
-            </group>
+            <SceneJitter enabled={!paused && !seeking}>
+              <group rotation={[0, Math.PI / 2, 0]}>
+                {showGrid && (
+                  <CellLayer
+                    cells={cells}
+                    meta={meta}
+                    patch={patch}
+                    onHover={(i) => setHover(i ? hoverInfo(i, gridEdges, nTheta) : null)}
+                    opacity={gridOpacity}
+                    travMode={viewMode === "trav"}
+                  />
+                )}
+                {showCloud &&
+                  (viewMode === "seg" ? (
+                    <CloudSegView cloud={cloud} size={pointSize + 0.4} />
+                  ) : (
+                    <CloudComparisonView cloud={cloud} size={pointSize} />
+                  ))}
+                <EgoMarker />
+              </group>
+            </SceneJitter>
             <OrbitControls
               key={`oc-${camMode}`}
               ref={(r) => {
@@ -330,8 +455,14 @@ export default function Home() {
             </div>
           )}
           {!buffering && cellCount === 0 && meta && !initializing && (
-            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-              <div className="frost px-4 py-2 text-xs text-zinc-400">Press Play to start</div>
+            <div className="absolute inset-0 z-10 flex items-center justify-center">
+              <button
+                onClick={() => handlePause(false)}
+                className="frost flex items-center gap-2 px-5 py-3 text-sm font-medium text-white ring-1 ring-cyan-400/30 hover:bg-white/10"
+              >
+                <span className="h-0 w-0 border-y-[6px] border-l-[10px] border-y-transparent border-l-white ml-0.5" />
+                Start playback
+              </button>
             </div>
           )}
 

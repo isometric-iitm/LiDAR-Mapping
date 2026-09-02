@@ -88,7 +88,7 @@ function unpackPatch(msg: Extract<WorkerPatch, { kind: "snap" | "delta" }>): { u
   | { type: "webgpu_unsupported" }
   | { type: "error"; message: string };
 
-export function useClientEngine(): UseClientEngine {
+export function useClientEngine(): UseClientEngine & { sendNetworkQuality: (q:{mbps:number;rtt:number;jitter?:number;online?:boolean})=>void } {
   const [conn] = useState<ConnState>("open");
   const [meta, setMeta] = useState<GridMeta | null>(null);
   const [cells, setCells] = useState<CellMap>(() => new Map());
@@ -177,6 +177,7 @@ export function useClientEngine(): UseClientEngine {
           if (msg.action === "seek") {
             epochRef.current = msg.epoch ?? epochRef.current;
             freezeFrame.current = -1;
+            lastAppliedFrame.current = -1;
             setSeeking(false);
           }
           return;
@@ -189,8 +190,12 @@ export function useClientEngine(): UseClientEngine {
           break;
       }
 
-      // per-frame messages below carry the seek epoch
-      if ("epoch" in msg) {
+      // reset patches always clear and resync epoch even if out-of-order with control_ack
+      if ((msg as any).type === "patch" && (msg as any).kind === "reset" && "epoch" in msg) {
+        epochRef.current = (msg as { epoch: number }).epoch;
+        lastAppliedFrame.current = -1;
+        // fall through to patch handling below (will clear)
+      } else if ("epoch" in msg) {
         const e = (msg as { epoch: number }).epoch;
         if (epochRef.current < 0) epochRef.current = e;
         else if (e !== epochRef.current) return;
@@ -255,7 +260,7 @@ export function useClientEngine(): UseClientEngine {
       if (gateRef.current.started) return; // already spawned
       gateRef.current.started = true;
       try {
-        worker = new Worker(new URL("./engineWorker", import.meta.url), { type: "module" });
+        worker = new Worker(new URL("./bakedWorker", import.meta.url), { type: "module" });
       } catch {
         gateRef.current.started = false;
         return;
@@ -319,6 +324,10 @@ export function useClientEngine(): UseClientEngine {
     []
   );
 
+  const sendNetworkQuality = useCallback((q:{mbps:number;rtt:number;jitter?:number;online?:boolean})=>{
+    sendRef.current({ type:"networkQuality", ...q } as any);
+  },[]);
+
   return {
     conn,
     meta,
@@ -344,5 +353,6 @@ export function useClientEngine(): UseClientEngine {
     download,
     error,
     start,
-  } as UseClientEngine;
+    sendNetworkQuality,
+  } as UseClientEngine & { sendNetworkQuality: (q:{mbps:number;rtt:number;jitter?:number;online?:boolean})=>void };
 }

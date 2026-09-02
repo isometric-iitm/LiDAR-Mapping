@@ -53,11 +53,7 @@ export default function ClientEngineLoader({ initializing, statusMsg, download, 
                 <div className="hud-bar_fill" style={{ width: `${((d.fraction ?? 0) * 100).toFixed(1)}%` }} />
               </div>
               <div className="flex justify-between font-mono text-[11px] text-zinc-500">
-                <span>
-                  {d.phase === "model"
-                    ? "neural weights"
-                    : `sequence part ${String((d.chunk ?? 0) + 1).padStart(2, "0")}`}
-                </span>
+                <span>{`sequence part ${String((d.chunk ?? 0) + 1).padStart(2, "0")}`}</span>
                 <span>
                   {(d.loaded / 1e6).toFixed(1)} / {(d.total / 1e6).toFixed(1)} MB
                 </span>
@@ -65,10 +61,10 @@ export default function ClientEngineLoader({ initializing, statusMsg, download, 
             </div>
           )}
 
-          {!d && !error && (
+           {!d && !error && (
             <div className="flex items-center gap-2 text-xs text-zinc-500">
               <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-400" />
-              {statusMsg ?? "Compiling WebGPU kernels..."}
+              {statusMsg ?? "Loading baked sequence..."}
             </div>
           )}
 
@@ -78,9 +74,7 @@ export default function ClientEngineLoader({ initializing, statusMsg, download, 
             </div>
           )}
 
-          <div className="text-[11px] text-zinc-600">
-            Assets are cached in your browser - next visits start instantly and work offline.
-          </div>
+
         </div>
       )}
     </div>

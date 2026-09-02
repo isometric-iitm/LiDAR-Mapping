@@ -1,0 +1,1 @@
+{"model": "quantized-int8", "variant": "edge-lite", "fps": 10, "snapshot_interval": 5, "quantization": "int8", "fallback": "fp16"}

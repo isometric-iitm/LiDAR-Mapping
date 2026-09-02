@@ -25,13 +25,10 @@ export function checkDevice(): GateVerdict {
   if (typeof window === "undefined") return { ok: true };
   const vw = window.innerWidth;
   const vh = window.innerHeight;
-  const hasGpu = "gpu" in navigator;
   if (vw < MIN_W || vh < MIN_H) {
     return { ok: false, why: "viewport", vw, vh, browser: detectBrowser(navigator.userAgent) };
   }
-  if (!hasGpu) {
-    return { ok: false, why: "webgpu", vw, vh, browser: detectBrowser(navigator.userAgent) };
-  }
+  // baked demo: no WebGPU required
   return { ok: true };
 }
 
@@ -101,11 +98,7 @@ export default function DeviceGate({ verdict, onPass }: { verdict: GateVerdict; 
   }
   return (
     <Panel title="WebGPU required" onProceed={onPass}>
-      This demo runs the neural network entirely in your browser, which needs WebGPU. Please use {help.name}.{" "}
-      {help.text}{" "}
-      <a href={help.link} target="_blank" rel="noreferrer" className="text-cyan-400 underline underline-offset-2">
-        More info
-      </a>
+      This baked demo does not require WebGPU. Please continue.
     </Panel>
   );
 }
