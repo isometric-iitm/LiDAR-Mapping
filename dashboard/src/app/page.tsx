@@ -10,6 +10,7 @@ import { Compass, Refresh } from "iconoir-react";
 import MetricsPanel, { type ViewMode } from "@/components/MetricsPanel";
 import Timeline from "@/components/Timeline";
 import ClientEngineLoader from "@/components/ClientEngineLoader";
+import DemoBanner from "@/components/DemoBanner";
 import { CLASSES } from "@/lib/colors";
 import {
   CellLayer,
@@ -321,6 +322,9 @@ export default function Home() {
               <div className="frost px-4 py-2 text-xs text-zinc-400">Press Play to start</div>
             </div>
           )}
+
+          {/* -- closable browser-engine banner (below the legend) ---------- */}
+          <DemoBanner />
 
           {/* -- HUD top chrome: legend (left) / camera controls (right) --- */}
           <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-3">

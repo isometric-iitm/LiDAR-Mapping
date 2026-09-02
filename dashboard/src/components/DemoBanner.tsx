@@ -1,0 +1,57 @@
+"use client";
+/**
+ * One-time, closable info banner (top-left, below the legend) explaining that
+ * this deployed demo runs the FULL pipeline — neural inference included — live
+ * in the browser via WebGPU; the deployed build simply trades throughput for
+ * zero-server hosting (a GPU-server deployment of the same code runs faster).
+ */
+import { useState } from "react";
+import { X } from "iconoir-react";
+
+const DISMISS_KEY = "pc2d-demo-banner-dismissed";
+
+/** Lazy initializer: reads storage during the FIRST render (no effect, no
+ *  cascading setState). Falls back to open when storage is unavailable. */
+function initialOpen(): boolean {
+  try {
+    return !window.sessionStorage.getItem(DISMISS_KEY);
+  } catch {
+    return true; // private mode / storage blocked: just show it
+  }
+}
+
+export default function DemoBanner() {
+  const [open, setOpen] = useState(initialOpen);
+
+  const close = () => {
+    setOpen(false);
+    try {
+      window.sessionStorage.setItem(DISMISS_KEY, "1");
+    } catch {
+      /* ignore */
+    }
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className="frost pointer-events-auto absolute left-3 top-14 z-20 max-w-xs px-3 py-2.5">
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 text-[11px] leading-snug text-zinc-300">
+          <span className="font-semibold text-cyan-300">Runs entirely in your browser.</span>{" "}
+          Segmentation, tracking &amp; rendering all execute live on-device via
+          WebGPU — no server behind this demo. The same pipeline on a dedicated
+          GPU server runs multiple times faster; this zero-server deployment
+          trades throughput for instant, scalable hosting.
+        </div>
+        <button
+          onClick={close}
+          aria-label="Dismiss"
+          className="shrink-0 rounded-[3px] p-0.5 text-zinc-500 transition-colors hover:bg-white/10 hover:text-zinc-200"
+        >
+          <X width={13} height={13} strokeWidth={2} />
+        </button>
+      </div>
+    </div>
+  );
+}

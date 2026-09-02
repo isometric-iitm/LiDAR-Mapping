@@ -31,7 +31,7 @@ Chunk layout (little-endian):
 Frames are gzip members so the worker can inflate each one independently with
 DecompressionStream("gzip") or pako.
 
-Config (env): PC2D_SEQ_DIR, PC2D_DEMO_FRAMES (default 120),
+Config (env): PC2D_SEQ_DIR, PC2D_DEMO_FRAMES (default 300),
 PC2D_DEMO_CHUNK_FRAMES (default 20), PC2D_DEMO_START (default 0),
 PC2D_DEMO_OUT (default dashboard/public/demo).
 """
@@ -123,7 +123,7 @@ def main() -> int:
     import os
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--seq-dir", type=str, default=None)
-    ap.add_argument("--frames", type=int, default=None, help="Total demo frames (default $PC2D_DEMO_FRAMES or 120)")
+    ap.add_argument("--frames", type=int, default=None, help="Total demo frames (default $PC2D_DEMO_FRAMES or 300)")
     ap.add_argument("--chunk-frames", type=int, default=None, help="Frames per chunk (default $PC2D_DEMO_CHUNK_FRAMES or 20)")
     ap.add_argument("--start", type=int, default=None, help="First sequence frame index (default $PC2D_DEMO_START or 0)")
     ap.add_argument("--out", type=str, default=None, help="Output dir (default $PC2D_DEMO_OUT or dashboard/public/demo)")
@@ -132,7 +132,7 @@ def main() -> int:
     args = ap.parse_args()
 
     seq_dir = find_seq_dir(args.seq_dir)
-    n_total = int(args.frames or os.getenv("PC2D_DEMO_FRAMES", 120))
+    n_total = int(args.frames or os.getenv("PC2D_DEMO_FRAMES", 300))
     chunk_frames = int(args.chunk_frames or os.getenv("PC2D_DEMO_CHUNK_FRAMES", 20))
     start = int(args.start if args.start is not None else os.getenv("PC2D_DEMO_START", 0))
     out_dir = Path(args.out or os.getenv("PC2D_DEMO_OUT", ROOT / "dashboard" / "public" / "demo"))
