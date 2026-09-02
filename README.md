@@ -466,9 +466,9 @@ This fetches `best_miou.pt` from [v1.0.0](https://github.com/isometric-iitm/LiDA
 
 A Next.js 16 + Three.js real-time 3D dashboard with interactive map, point cloud overlays, playback controls, and training curves. See **[dashboard/README.md](dashboard/README.md)** for full documentation.
 
-| 2.5D Grid | Segmented Cloud | Compare (Grid + Raw Cloud) |
-|-----------|-----------------|----------------------------|
-| ![2.5D Grid](docs/assets/grid_2.5d.png) | ![Segmented Cloud](docs/assets/segmented_cloud.png) | ![Compare View](docs/assets/compare_view.png) |
+| 2.5D Grid | Segmented Cloud | Compare (Grid + Raw Cloud) | Traversability |
+|-----------|-----------------|----------------------------|----------------|
+| ![2.5D Grid](docs/assets/grid_2.5d.png) | ![Segmented Cloud](docs/assets/segmented_cloud.png) | ![Compare View](docs/assets/compare_view.png) | ![Traverse View](docs/assets/traverse.png) |
 
 *Full animated demo at the top of this README.*
 
